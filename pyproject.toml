@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "dng-channel-tool"
+version = "1.0.0"
+description = "Color channel swap, IR photography tools, and preset converter for Nikon/Canon/Sony/Fujifilm cameras and Adobe Lightroom"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Axel"},
+]
+keywords = ["photography", "infrared", "dng", "nikon", "fujifilm", "lightroom", "preset", "picture-control", "lut", "dcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+raw = ["rawpy>=0.19"]
+full = ["rawpy>=0.19", "exifread>=3.0"]
+
+[project.scripts]
+dng-channel-tool = "main:main"
+
+[project.urls]
+Homepage = "https://github.com/axel/dng-channel-tool"
+Issues = "https://github.com/axel/dng-channel-tool/issues"
