@@ -74,14 +74,14 @@ Convert presets between all supported camera systems:
 
 ### Quick Start (Windows)
 ```bash
-git clone https://github.com/YOUR_USERNAME/dng-channel-tool.git
+git clone https://github.com/Axel051171/dng-channel-tool.git
 cd dng-channel-tool
 run.bat
 ```
 
 ### Manual Installation
 ```bash
-git clone https://github.com/YOUR_USERNAME/dng-channel-tool.git
+git clone https://github.com/Axel051171/dng-channel-tool.git
 cd dng-channel-tool
 pip install -r requirements.txt
 python main.py
