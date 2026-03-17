@@ -251,9 +251,9 @@ def calculate_ir_wb(image: np.ndarray, x: int, y: int,
 
     # Ziel: Vegetation soll neutral-weiß werden
     target = max(avg_r, avg_g, avg_b)
-    r_gain = target / max(avg_r, 1)
-    g_gain = target / max(avg_g, 1)
-    b_gain = target / max(avg_b, 1)
+    r_gain = min(target / max(avg_r, 1), 6.0)  # Gain begrenzen (IR braucht höhere Werte)
+    g_gain = min(target / max(avg_g, 1), 6.0)
+    b_gain = min(target / max(avg_b, 1), 6.0)
 
     ir_filter = IR_FILTERS.get(filter_type, IR_FILTERS["720nm"])
 

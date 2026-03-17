@@ -1343,3 +1343,8 @@ def format_sony_look(look: SonyCreativeLook) -> str:
     if look.is_monochrome:
         lines.append(f"  (Schwarzweiss-Look)")
     return "\n".join(lines)
+
+
+# Aliases für konsistente Import-Namen
+canon_to_xmp = canon_to_lightroom_xmp
+sony_to_xmp = sony_to_lightroom_xmp

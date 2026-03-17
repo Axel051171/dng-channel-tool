@@ -47,9 +47,9 @@ def calculate_wb_from_pixel(image: np.ndarray, x: int, y: int,
     # Gains to make this pixel neutral gray
     # Normalize to green channel (most common reference)
     target = avg_g  # Green as reference
-    r_gain = target / avg_r
+    r_gain = min(target / avg_r, 4.0)  # Gain auf max 4.0 begrenzen
     g_gain = 1.0
-    b_gain = target / avg_b
+    b_gain = min(target / avg_b, 4.0)
 
     # Estimate color temperature from R/B ratio
     rb_ratio = avg_r / avg_b

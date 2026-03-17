@@ -42,6 +42,13 @@ TAG_FORWARD_MATRIX_1 = 50964           # 0xC714 - SRATIONAL[9]
 TAG_FORWARD_MATRIX_2 = 50965           # 0xC715 - SRATIONAL[9]
 TAG_PROFILE_LOOK_TABLE_DIMS = 50981    # 0xC725 - LONG[3]
 TAG_PROFILE_LOOK_TABLE_DATA = 50982    # 0xC726 - FLOAT[]
+TAG_REDUCTION_MATRIX_1 = 50725         # 0xC625 - SRATIONAL[]
+TAG_REDUCTION_MATRIX_2 = 50726         # 0xC626 - SRATIONAL[]
+TAG_PROFILE_HUE_SAT_MAP_ENCODING = 51107  # 0xC7A3 - LONG
+TAG_PROFILE_LOOK_TABLE_ENCODING = 51108   # 0xC7A4 - LONG
+TAG_BASELINE_EXPOSURE_OFFSET = 51109      # 0xC7A5 - SRATIONAL
+TAG_DEFAULT_BLACK_RENDER = 51110          # 0xC7A6 - LONG
+TAG_UNIQUE_CAMERA_MODEL_RESTRICTION = 50708  # Same as UniqueCameraModel in profile context
 
 # Illuminant constants
 ILLUMINANT_A = 17           # Standard Light A (~2856K)
@@ -103,9 +110,19 @@ class DCPProfile:
     look_table_dims: Optional[tuple] = None
     look_table_data: Optional[bytes] = None
 
+    # Reduction matrices (optional, for >3 color channels)
+    reduction_matrix_1: Optional[np.ndarray] = None
+    reduction_matrix_2: Optional[np.ndarray] = None
+
     # Tone curve (raw float data, preserved for pass-through)
     tone_curve_data: Optional[bytes] = None
     tone_curve_count: int = 0
+
+    # Extended DCP fields (from dcpTool)
+    hue_sat_map_encoding: int = 0       # 0 = Linear, 1 = sRGB
+    look_table_encoding: int = 0        # 0 = Linear, 1 = sRGB
+    baseline_exposure_offset: float = 0.0
+    default_black_render: int = 0       # 0 = Auto, 1 = None
 
     def has_dual_illuminant(self) -> bool:
         return self.color_matrix_2 is not None
@@ -202,6 +219,37 @@ class DCPWriter:
             count = len(profile.look_table_data) // 4
             tags.append((TAG_PROFILE_LOOK_TABLE_DATA, TIFF_FLOAT, count, profile.look_table_data))
 
+        # ReductionMatrix1/2 (optional)
+        if profile.reduction_matrix_1 is not None:
+            rows, cols = profile.reduction_matrix_1.shape
+            mat_data = self._encode_matrix_generic(profile.reduction_matrix_1)
+            tags.append((TAG_REDUCTION_MATRIX_1, TIFF_SRATIONAL, rows * cols, mat_data))
+        if profile.reduction_matrix_2 is not None:
+            rows, cols = profile.reduction_matrix_2.shape
+            mat_data = self._encode_matrix_generic(profile.reduction_matrix_2)
+            tags.append((TAG_REDUCTION_MATRIX_2, TIFF_SRATIONAL, rows * cols, mat_data))
+
+        # HueSatMapEncoding (only if non-linear)
+        if profile.hue_sat_map_encoding != 0:
+            tags.append((TAG_PROFILE_HUE_SAT_MAP_ENCODING, TIFF_LONG, 1,
+                         struct.pack('<I', profile.hue_sat_map_encoding)))
+
+        # LookTableEncoding (only if non-linear)
+        if profile.look_table_encoding != 0:
+            tags.append((TAG_PROFILE_LOOK_TABLE_ENCODING, TIFF_LONG, 1,
+                         struct.pack('<I', profile.look_table_encoding)))
+
+        # BaselineExposureOffset (only if non-zero)
+        if profile.baseline_exposure_offset != 0.0:
+            num, den = _float_to_srational(profile.baseline_exposure_offset)
+            tags.append((TAG_BASELINE_EXPOSURE_OFFSET, TIFF_SRATIONAL, 1,
+                         struct.pack('<ii', num, den)))
+
+        # DefaultBlackRender (only if non-auto)
+        if profile.default_black_render != 0:
+            tags.append((TAG_DEFAULT_BLACK_RENDER, TIFF_LONG, 1,
+                         struct.pack('<I', profile.default_black_render)))
+
         # Sort tags by tag ID (TIFF requirement)
         tags.sort(key=lambda t: t[0])
 
@@ -246,6 +294,10 @@ class DCPWriter:
 
     def _encode_matrix(self, matrix: np.ndarray) -> bytes:
         """Encode a 3x3 matrix as 9 SRATIONAL values."""
+        return self._encode_matrix_generic(matrix)
+
+    def _encode_matrix_generic(self, matrix: np.ndarray) -> bytes:
+        """Encode a matrix of any shape as SRATIONAL values."""
         flat = matrix.flatten()
         data = bytearray()
         for val in flat:
@@ -261,6 +313,9 @@ class DCPReader:
         """Read a DCP profile from file."""
         with open(filepath, 'rb') as f:
             data = f.read()
+
+        if len(data) < 8:
+            raise ValueError(f"Datei zu kurz für TIFF-Header ({len(data)} Bytes)")
 
         profile = DCPProfile()
 
@@ -279,11 +334,20 @@ class DCPReader:
 
         ifd_offset = struct.unpack_from(f'{endian}I', data, 4)[0]
 
+        if ifd_offset + 2 > len(data):
+            raise ValueError(f"IFD-Offset {ifd_offset} liegt außerhalb der Datei ({len(data)} Bytes)")
+
         # Parse IFD
         num_entries = struct.unpack_from(f'{endian}H', data, ifd_offset)[0]
+
+        if num_entries > 1000:
+            raise ValueError(f"Unrealistische Anzahl IFD-Einträge: {num_entries}")
+
         offset = ifd_offset + 2
 
         for i in range(num_entries):
+            if offset + 12 > len(data):
+                break  # Datei abgeschnitten
             tag_id, tag_type, count = struct.unpack_from(f'{endian}HHI', data, offset)
             value_offset_raw = data[offset + 8:offset + 12]
             offset += 12
@@ -295,6 +359,8 @@ class DCPReader:
                 value_data = value_offset_raw
             else:
                 val_offset = struct.unpack_from(f'{endian}I', value_offset_raw, 0)[0]
+                if val_offset + total_size > len(data):
+                    continue  # Offset außerhalb der Datei, Tag überspringen
                 value_data = data[val_offset:val_offset + total_size]
 
             # Parse known tags
@@ -353,15 +419,49 @@ class DCPReader:
             elif tag_id == TAG_PROFILE_LOOK_TABLE_DATA:
                 profile.look_table_data = value_data[:total_size]
 
+            elif tag_id == TAG_REDUCTION_MATRIX_1:
+                profile.reduction_matrix_1 = self._decode_matrix_generic(
+                    value_data, endian, count)
+
+            elif tag_id == TAG_REDUCTION_MATRIX_2:
+                profile.reduction_matrix_2 = self._decode_matrix_generic(
+                    value_data, endian, count)
+
+            elif tag_id == TAG_PROFILE_HUE_SAT_MAP_ENCODING:
+                profile.hue_sat_map_encoding = struct.unpack_from(
+                    f'{endian}I', value_data, 0)[0]
+
+            elif tag_id == TAG_PROFILE_LOOK_TABLE_ENCODING:
+                profile.look_table_encoding = struct.unpack_from(
+                    f'{endian}I', value_data, 0)[0]
+
+            elif tag_id == TAG_BASELINE_EXPOSURE_OFFSET:
+                num, den = struct.unpack_from(f'{endian}ii', value_data, 0)
+                profile.baseline_exposure_offset = _srational_to_float(num, den)
+
+            elif tag_id == TAG_DEFAULT_BLACK_RENDER:
+                profile.default_black_render = struct.unpack_from(
+                    f'{endian}I', value_data, 0)[0]
+
         return profile
 
     def _decode_matrix(self, data: bytes, endian: str) -> np.ndarray:
         """Decode 9 SRATIONAL values into a 3x3 matrix."""
+        return self._decode_matrix_generic(data, endian, 9).reshape(3, 3)
+
+    def _decode_matrix_generic(self, data: bytes, endian: str, count: int) -> np.ndarray:
+        """Decode SRATIONAL values into a matrix. Infers shape from count."""
         values = []
-        for i in range(9):
+        for i in range(count):
             num, den = struct.unpack_from(f'{endian}ii', data, i * 8)
             values.append(_srational_to_float(num, den))
-        return np.array(values).reshape(3, 3)
+        arr = np.array(values)
+        # Try to reshape: 9→3x3, 12→3x4 or 4x3, etc.
+        if count == 9:
+            return arr.reshape(3, 3)
+        elif count % 3 == 0:
+            return arr.reshape(-1, 3)
+        return arr
 
 
 def get_adobe_profile_dir() -> str:
@@ -371,6 +471,43 @@ def get_adobe_profile_dir() -> str:
         return os.path.join(appdata, 'Adobe', 'CameraRaw', 'CameraProfiles')
     home = os.path.expanduser('~')
     return os.path.join(home, 'AppData', 'Roaming', 'Adobe', 'CameraRaw', 'CameraProfiles')
+
+
+def rewrite_dcp_camera_model(src_path: str, dest_path: str,
+                              new_camera_model: str,
+                              new_profile_name: str = None) -> DCPProfile:
+    """
+    Liest ein DCP-Profil, ändert das Kameramodell (UniqueCameraModel)
+    und optional den Profilnamen, und schreibt es neu.
+
+    Damit kann ein bestehendes DCP-Profil für eine andere Kamera
+    kompatibel gemacht werden (z.B. Z6 → Z6_2 oder umgekehrt).
+
+    Args:
+        src_path: Quell-DCP-Datei
+        dest_path: Ziel-DCP-Datei (kann gleich src_path sein)
+        new_camera_model: Neuer Kamera-Modellname (exakt wie in EXIF)
+        new_profile_name: Optional neuer Profilname
+
+    Returns:
+        Das modifizierte DCPProfile
+    """
+    reader = DCPReader()
+    profile = reader.read(src_path)
+
+    old_model = profile.camera_model
+    profile.camera_model = new_camera_model
+
+    if new_profile_name:
+        profile.profile_name = new_profile_name
+    elif old_model in profile.profile_name:
+        # Profilname automatisch anpassen wenn alter Kameraname drin steckt
+        profile.profile_name = profile.profile_name.replace(old_model, new_camera_model)
+
+    writer = DCPWriter()
+    writer.write(dest_path, profile)
+
+    return profile
 
 
 def install_dcp_to_adobe(dcp_path: str, subfolder: str = "Channel Swap") -> str:

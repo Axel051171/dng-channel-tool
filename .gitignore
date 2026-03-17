@@ -23,3 +23,5 @@ env/
 *.tmp
 Thumbs.db
 .DS_Store
+.claude/
+.pytest_cache/

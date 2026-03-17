@@ -117,13 +117,38 @@ def compute_correction_matrix(patches: List[ColorPatch]) -> CalibrationResult:
     M, residuals, rank, sv = np.linalg.lstsq(measured, reference, rcond=None)
     correction_matrix = M.T  # 3x3 matrix: corrected = M @ input
 
-    # Calculate Delta E (simplified, Euclidean in sRGB)
-    corrected = (measured @ M) * 255
+    # Delta E berechnen (CIELAB ΔE76)
+    corrected = measured @ M
+
+    def _srgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+        """Konvertiert sRGB (0-1) nach CIELAB."""
+        # sRGB → Linear RGB
+        linear = np.where(rgb > 0.04045, ((rgb + 0.055) / 1.055) ** 2.4, rgb / 12.92)
+        # Linear RGB → XYZ (D50 Referenz-Weiß)
+        m_xyz = np.array([
+            [0.4360747, 0.3850649, 0.1430804],
+            [0.2225045, 0.7168786, 0.0606169],
+            [0.0139322, 0.0971045, 0.7141733],
+        ])
+        xyz = linear @ m_xyz.T
+        # D50 Referenz-Weißpunkt
+        xyz_ref = np.array([0.9642, 1.0000, 0.8251])
+        xyz_n = xyz / xyz_ref
+        # XYZ → Lab
+        delta = 6 / 29
+        f = np.where(xyz_n > delta ** 3,
+                     np.cbrt(xyz_n),
+                     xyz_n / (3 * delta ** 2) + 4 / 29)
+        L = 116 * f[1] - 16
+        a = 500 * (f[0] - f[1])
+        b_val = 200 * (f[1] - f[2])
+        return np.array([L, a, b_val])
+
     deltas = []
     for i in range(n):
-        ref = np.array(reference[i]) * 255
-        cor = corrected[i]
-        delta = np.sqrt(np.sum((ref - cor) ** 2))
+        lab_ref = _srgb_to_lab(reference[i])
+        lab_cor = _srgb_to_lab(np.clip(corrected[i], 0, 1))
+        delta = np.sqrt(np.sum((lab_ref - lab_cor) ** 2))
         deltas.append(delta)
 
     return CalibrationResult(

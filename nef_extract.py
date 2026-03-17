@@ -158,9 +158,16 @@ def extract_picture_control(nef_path: str) -> NikonPictureControl:
         try:
             ratios = str(wb_coeff).split(', ')
             if len(ratios) >= 2:
-                pc.wb_r_coeff = eval(ratios[0])
-                pc.wb_b_coeff = eval(ratios[1])
-        except Exception:
+                # Sicheres Parsen von Ratio-Strings wie "256/128"
+                def _parse_ratio(s: str) -> float:
+                    s = s.strip()
+                    if '/' in s:
+                        num, den = s.split('/', 1)
+                        return float(num) / float(den)
+                    return float(s)
+                pc.wb_r_coeff = _parse_ratio(ratios[0])
+                pc.wb_b_coeff = _parse_ratio(ratios[1])
+        except (ValueError, ZeroDivisionError):
             pass
 
     ct_auto = tags.get('MakerNote ColorTemperatureAuto')

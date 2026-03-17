@@ -179,7 +179,7 @@ def _build_header(
     pcs : bytes
         4-byte profile connection space (b'XYZ ').
     """
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     header = bytearray(128)
 

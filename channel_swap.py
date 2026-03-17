@@ -76,6 +76,13 @@ class ChannelMapping:
     g_source: int = 1
     b_source: int = 2
 
+    def __post_init__(self):
+        for name, val in [('r_source', self.r_source),
+                          ('g_source', self.g_source),
+                          ('b_source', self.b_source)]:
+            if not (0 <= val <= 2):
+                raise ValueError(f"{name} muss 0, 1 oder 2 sein, bekam {val}")
+
     @property
     def permutation(self) -> Tuple[int, int, int]:
         return (self.r_source, self.g_source, self.b_source)
@@ -151,8 +158,16 @@ class MixMatrix:
 
 # ── Image channel operations ──────────────────────────────────
 
+def _validate_rgb_image(image: np.ndarray):
+    """Prüft ob das Bild ein gültiges 3-Kanal RGB-Array ist."""
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(
+            f"Erwartet 3-Kanal RGB-Bild (H×W×3), bekam Shape {image.shape}")
+
+
 def swap_image_channels(image: np.ndarray, mapping: ChannelMapping) -> np.ndarray:
     """Swap color channels in an RGB image (permutation only)."""
+    _validate_rgb_image(image)
     if mapping.is_identity:
         return image.copy()
     result = np.empty_like(image)
@@ -164,6 +179,7 @@ def swap_image_channels(image: np.ndarray, mapping: ChannelMapping) -> np.ndarra
 
 def mix_image_channels(image: np.ndarray, mix: MixMatrix) -> np.ndarray:
     """Apply weighted channel mixing to an RGB image."""
+    _validate_rgb_image(image)
     if mix.is_identity:
         return image.copy()
 
@@ -265,6 +281,10 @@ def remap_hue_sat_map(data: bytes, dims: tuple, mix: MixMatrix, endian: str = '<
     how the swap rotates the hue wheel.
     """
     num_hues, num_sats, num_vals = dims
+
+    if num_hues <= 0 or num_sats <= 0 or num_vals <= 0:
+        return data  # Ungültige Dimensionen, unverändert zurückgeben
+
     num_entries = num_hues * num_sats * num_vals
     expected_size = num_entries * 3 * 4  # 3 floats * 4 bytes
 
@@ -272,8 +292,11 @@ def remap_hue_sat_map(data: bytes, dims: tuple, mix: MixMatrix, endian: str = '<
         return data  # Can't process, return unchanged
 
     # Parse float data
-    floats = struct.unpack(f'{endian}{num_entries * 3}f', data[:expected_size])
-    arr = np.array(floats).reshape(num_vals, num_sats, num_hues, 3)
+    try:
+        floats = struct.unpack(f'{endian}{num_entries * 3}f', data[:expected_size])
+        arr = np.array(floats).reshape(num_vals, num_sats, num_hues, 3)
+    except (struct.error, ValueError):
+        return data  # Korrupte Daten, unverändert zurückgeben
     result = np.zeros_like(arr)
 
     m = mix.matrix

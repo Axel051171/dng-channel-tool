@@ -59,12 +59,22 @@ Convert presets between all supported camera systems:
 - **Compare** original + edited versions to extract the exact transformation
 - **Histogram Matching** for precise color distribution transfer
 
+### DCP Profile Tools (NEW in v2.0)
+- **DCP Camera Model Rewrite** — change camera model in DCP files (e.g. Z6 to Z6 II)
+- **DCP to XML / XML to DCP** — decompile/compile profiles (dcpTool-compatible format)
+- **Make Invariant** — merge LookTable into HueSatMap for predictable profiles
+- **UnTwist** — remove value-dependent hue shifts from profiles
+- **PGM to DNG Converter** — create DNG files from raw sensor data with CFA patterns
+
 ### Additional Tools
 - **White Balance Picker** — click on neutral gray to calculate WB correction
 - **Color Checker Calibration** — photograph an X-Rite ColorChecker, auto-generate DCP profile
 - **Camera JPEG vs RAW comparison** — split-view of camera rendering vs neutral RAW
 - **Preset Library** — browse all installed presets (Adobe, Nikon, LUTs) with search
 - **Batch Processing** — apply channel swap to multiple files at once
+- **Export All** — DCP + XMP + LUT + ICC with one click (Ctrl+Shift+E)
+- **Drag & Drop** — drop images and profiles onto the window
+- **Recent Files** — quickly reopen last 10 files
 - **705 camera database** — color matrices from dnglab for DCP profile generation
 - **Zoom/Pan** — mouse wheel zoom, drag to pan, double-click reset
 
@@ -115,6 +125,46 @@ parent/
 python main.py
 ```
 
+### CLI (Headless Mode)
+```bash
+# Channel swap DCP profile
+python main.py --swap RB --camera "NIKON Z 8" --export-dcp output.dcp
+
+# Export all formats at once
+python main.py --swap RB --camera "NIKON Z 8" \
+  --export-dcp out.dcp --export-xmp out.xmp \
+  --export-lut out.cube --export-icc out.icc
+
+# Custom mix matrix
+python main.py --mix "0,0,1,0,1,0,1,0,0" --camera "Canon EOS R5" --export-dcp ir.dcp
+
+# Process image with channel swap
+python main.py input.jpg --swap RB --export-image output.jpg
+
+# Use existing DCP as base
+python main.py --load-dcp "Adobe Standard.dcp" --swap RB --camera "NIKON Z 6_2" --export-dcp swapped.dcp
+```
+
+### DCP XML Tools (CLI)
+```bash
+# Decompile DCP to XML
+python dcp_xml.py -d profile.dcp profile.xml
+
+# Compile XML back to DCP
+python dcp_xml.py -c profile.xml profile.dcp
+
+# Make DCP invariant (merge LookTable)
+python dcp_xml.py -i profile.dcp invariant.dcp
+
+# Remove hue twists
+python dcp_xml.py -u profile.dcp untwisted.dcp
+```
+
+### PGM to DNG (CLI)
+```bash
+python dng_writer.py input.pgm output.dng --pattern=RGGB --camera="NIKON Z 8" --wp=0.47,1.0,0.63
+```
+
 ### Keyboard Shortcuts
 | Key | Action |
 |-----|--------|
@@ -122,6 +172,7 @@ python main.py
 | `Ctrl+S` | Save image |
 | `Ctrl+E` | Export DCP profile |
 | `Ctrl+N` | Extract NEF Picture Control |
+| `Ctrl+Shift+E` | Export all (DCP+XMP+LUT+ICC) |
 | `Ctrl+B` | Batch processing |
 | `Ctrl+L` | Preset library |
 | `V` | Toggle before/after split view |
@@ -156,9 +207,11 @@ python main.py
 ## File Structure
 ```
 dng-channel-tool/
-├── main.py              # GUI application
+├── main.py              # GUI application + CLI entry point
 ├── channel_swap.py      # Channel swap & mix logic
 ├── dcp_io.py            # Adobe DCP profile read/write
+├── dcp_xml.py           # DCP ↔ XML conversion, make invariant, untwist
+├── dng_writer.py        # PGM → DNG converter
 ├── xmp_export.py        # Lightroom XMP preset export
 ├── npc_io.py            # Nikon NPC/NP3 read/write
 ├── nef_extract.py       # NEF Picture Control extraction
@@ -172,7 +225,12 @@ dng-channel-tool/
 ├── color_checker.py     # ColorChecker calibration
 ├── preset_library.py    # Preset browser/manager
 ├── icc_export.py        # ICC v2 profile export
-├── requirements.txt
+├── gui_dialogs.py       # Dialog windows
+├── gui_widgets.py       # Reusable UI components
+├── undo.py              # Undo/Redo system
+├── logging_setup.py     # Logging configuration
+├── tests/
+│   └── test_core.py     # 119 unit tests
 ├── pyproject.toml
 ├── run.bat              # Windows quick start
 └── LICENSE

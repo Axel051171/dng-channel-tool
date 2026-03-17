@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "dng-channel-tool"
-version = "1.0.0"
+version = "2.0.0"
 description = "Color channel swap, IR photography tools, and preset converter for Nikon/Canon/Sony/Fujifilm cameras and Adobe Lightroom"
 readme = "README.md"
 license = {text = "MIT"}
@@ -36,6 +36,9 @@ full = ["rawpy>=0.19", "exifread>=3.0"]
 [project.scripts]
 dng-channel-tool = "main:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [project.urls]
-Homepage = "https://github.com/axel/dng-channel-tool"
-Issues = "https://github.com/axel/dng-channel-tool/issues"
+Homepage = "https://github.com/Axel051171/dng-channel-tool"
+Issues = "https://github.com/Axel051171/dng-channel-tool/issues"
