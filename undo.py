@@ -136,8 +136,9 @@ class UndoManager:
         self._callbacks.append(callback)
 
     def _notify(self):
+        import logging
         for cb in self._callbacks:
             try:
                 cb()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger(__name__).warning("Undo-Callback fehlgeschlagen: %s", e)

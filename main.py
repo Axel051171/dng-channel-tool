@@ -36,10 +36,11 @@ from PIL import Image, ImageTk
 
 from logging_setup import setup_logging
 from undo import UndoManager
-from gui_widgets import AutocompleteCombobox, HistogramWidget
+from gui_widgets import AutocompleteCombobox, HistogramWidget, ToolTip, ProgressDialog
 from gui_dialogs import (
     BatchDialog, NEFExtractDialog, FujiRecipeDialog,
     StyleResultDialog, NikonPresetCreatorDialog, PresetLibraryDialog,
+    CanonSonyPresetDialog, ExportAllDialog, ToneCurveDialog, CropDialog,
 )
 
 from channel_swap import (
@@ -217,8 +218,16 @@ class ChannelToolApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(WINDOW_TITLE)
-        self.root.geometry("1280x860")
+        # Fensterposition und Einstellungen aus Config wiederherstellen
+        config = _load_config()
+        geometry = config.get("window_geometry", "1280x860")
+        self.root.geometry(geometry)
         self.root.minsize(900, 600)
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+        if "show_histogram" in config:
+            self.show_histogram.set(config["show_histogram"])
+        if "split_position" in config:
+            self.split_position = config["split_position"]
 
         # ── State ──
         self.original_image: Optional[np.ndarray] = None
@@ -248,6 +257,8 @@ class ChannelToolApp:
         self.pan_y = 0.0
         self._drag_start = None
         self.wb_picker_active = False  # WB-Pipette Modus
+        self.split_position = 0.5  # Vergleichs-Slider Position (0.0-1.0)
+        self._split_dragging = False
 
         # Detected camera from EXIF
         self.detected_camera: Optional[str] = None
@@ -265,6 +276,7 @@ class ChannelToolApp:
         # Build UI
         self._build_menu()
         self._build_ui()
+        self._setup_tooltips()
         self._setup_dnd()  # Fix #1
         self._update_status("Bereit – Bild oder DCP-Profil laden zum Starten.")
 
@@ -305,6 +317,13 @@ class ChannelToolApp:
         file_menu.add_command(label="Alles exportieren…",
                               command=self._export_all,
                               accelerator="Ctrl+Shift+E")
+        file_menu.add_command(label="Vorher/Nachher-Vergleich speichern…",
+                              command=self._save_comparison)
+        file_menu.add_separator()
+        file_menu.add_command(label="Mix-Preset speichern (.dct)…",
+                              command=self._save_mix_preset)
+        file_menu.add_command(label="Mix-Preset laden (.dct)…",
+                              command=self._load_mix_preset)
         file_menu.add_separator()
         file_menu.add_command(label="Batch-Verarbeitung…",
                               command=self._open_batch_dialog,
@@ -341,6 +360,22 @@ class ChannelToolApp:
         view_menu.add_separator()
         view_menu.add_command(label="Zoom zurücksetzen",
                               command=self._reset_zoom, accelerator="Doppelklick")
+        view_menu.add_command(label="Zoom +", command=self._zoom_in, accelerator="+")
+        view_menu.add_command(label="Zoom -", command=self._zoom_out, accelerator="-")
+        view_menu.add_separator()
+        view_menu.add_command(label="Bild drehen 90° rechts",
+                              command=lambda: self._rotate_image(90), accelerator="R")
+        view_menu.add_command(label="Bild drehen 90° links",
+                              command=lambda: self._rotate_image(-90))
+        view_menu.add_command(label="Horizontal spiegeln",
+                              command=lambda: self._flip_image('h'))
+        view_menu.add_command(label="Vertikal spiegeln",
+                              command=lambda: self._flip_image('v'))
+        view_menu.add_separator()
+        view_menu.add_command(label="Bild zuschneiden…",
+                              command=self._open_crop_dialog, accelerator="C")
+        view_menu.add_command(label="Tonkurve bearbeiten…",
+                              command=self._open_tone_curve_dialog, accelerator="T")
         menubar.add_cascade(label="Ansicht", menu=view_menu)
 
         # Extras
@@ -486,6 +521,25 @@ class ChannelToolApp:
                        if HAS_LIBRARY else None)
         self.root.bind('<Control-Shift-E>', lambda e: self._export_all())
 
+        # Schnelltasten für Swap-Presets (1-6)
+        preset_list = list(SWAP_PRESETS.items())
+        for idx, (name, perm) in enumerate(preset_list[:6]):
+            self.root.bind(str(idx + 1),
+                           lambda e, p=perm: self._apply_preset(p))
+
+        # Zusätzliche Shortcuts
+        self.root.bind('<Escape>', lambda e: self._reset_to_identity())
+        self.root.bind('<plus>', lambda e: self._zoom_in())
+        self.root.bind('<minus>', lambda e: self._zoom_out())
+        self.root.bind('<F5>', lambda e: self._on_mapping_changed())
+        self.root.bind('<h>', lambda e: self._on_histogram_toggle_key())
+        self.root.bind('<H>', lambda e: self._on_histogram_toggle_key())
+        self.root.bind('<r>', lambda e: self._rotate_image(90))
+        self.root.bind('<R>', lambda e: self._rotate_image(90))
+        self.root.bind('<c>', lambda e: self._open_crop_dialog())
+        self.root.bind('<t>', lambda e: self._open_tone_curve_dialog())
+        self.root.bind('<T>', lambda e: self._open_tone_curve_dialog())
+
     # ── UI Building ───────────────────────────────────────────
 
     def _build_ui(self):
@@ -522,14 +576,23 @@ class ChannelToolApp:
         canvas_scroll.create_window((0, 0), window=scroll_frame, anchor='nw')
         canvas_scroll.configure(yscrollcommand=scrollbar.set)
 
-        # Mouse wheel scrolling for right panel
+        # Mouse wheel scrolling for right panel (Fix: per-widget statt bind_all)
+        self._scroll_canvas = canvas_scroll
+
         def _on_scroll_mousewheel(event):
             canvas_scroll.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas_scroll.bind_all('<MouseWheel>', lambda e: None)  # Will rebind per-widget
-        scroll_frame.bind('<Enter>',
-                          lambda e: canvas_scroll.bind_all('<MouseWheel>', _on_scroll_mousewheel))
-        scroll_frame.bind('<Leave>',
-                          lambda e: canvas_scroll.bind_all('<MouseWheel>', lambda ev: None))
+            return "break"  # Verhindert Weiterleitung an Bild-Canvas
+
+        def _bind_scroll(event):
+            canvas_scroll.bind('<MouseWheel>', _on_scroll_mousewheel)
+
+        def _unbind_scroll(event):
+            canvas_scroll.unbind('<MouseWheel>')
+
+        scroll_frame.bind('<Enter>', _bind_scroll)
+        scroll_frame.bind('<Leave>', _unbind_scroll)
+        canvas_scroll.bind('<Enter>', _bind_scroll)
+        canvas_scroll.bind('<Leave>', _unbind_scroll)
 
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -606,24 +669,50 @@ class ChannelToolApp:
                      width=8).pack(side=tk.LEFT, padx=2)
 
         self.mix_scales = []
+        self.mix_labels = []  # Prozent-Labels neben Slidern
         for out_ch in range(3):
             row = ttk.Frame(self.mix_frame)
             row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=f"{CHANNEL_SHORT[out_ch]} aus:", fg=colors[out_ch],
                      font=('Consolas', 9, 'bold'), width=10).pack(side=tk.LEFT)
             row_scales = []
+            row_labels = []
             for in_ch in range(3):
                 var = self.mix_vars[out_ch][in_ch]
                 scale = ttk.Scale(row, from_=0, to=1.0, variable=var,
                                   orient=tk.HORIZONTAL, length=80,
                                   command=lambda v, o=out_ch, i=in_ch: self._on_mix_changed())
                 scale.pack(side=tk.LEFT, padx=2)
+                pct_label = tk.Label(row, text="100%" if out_ch == in_ch else "0%",
+                                     font=('Consolas', 7), width=4, fg='#888')
+                pct_label.pack(side=tk.LEFT)
                 row_scales.append(scale)
+                row_labels.append(pct_label)
             self.mix_scales.append(row_scales)
+            self.mix_labels.append(row_labels)
 
         norm_btn = ttk.Button(self.mix_frame, text="Normalisieren (Zeilen → 100%)",
                               command=self._normalize_mix)
         norm_btn.pack(fill=tk.X, pady=(5, 0))
+
+        # ── Belichtungskorrektur ──
+        exp_frame = ttk.LabelFrame(scroll_frame, text="  Belichtung & Anpassung  ", padding=8)
+        exp_frame.pack(fill=tk.X, **pad)
+
+        self.exposure_var = tk.DoubleVar(value=0.0)
+        exp_row = ttk.Frame(exp_frame)
+        exp_row.pack(fill=tk.X, pady=2)
+        ttk.Label(exp_row, text="Belichtung (EV):", width=15).pack(side=tk.LEFT)
+        self.exposure_label = ttk.Label(exp_row, text="0.0 EV", width=8)
+        self.exposure_label.pack(side=tk.RIGHT, padx=5)
+        self.exposure_scale = ttk.Scale(exp_row, from_=-3.0, to=3.0,
+                                         variable=self.exposure_var,
+                                         orient=tk.HORIZONTAL, length=150,
+                                         command=self._on_exposure_changed)
+        self.exposure_scale.pack(side=tk.RIGHT, padx=5)
+
+        ttk.Button(exp_frame, text="Belichtung zurücksetzen",
+                   command=self._reset_exposure).pack(fill=tk.X, pady=(3, 0))
 
         # ── Matrix Preview ──
         mat_frame = ttk.LabelFrame(scroll_frame, text="  Matrix-Vorschau  ", padding=8)
@@ -697,6 +786,40 @@ class ChannelToolApp:
         self._on_mode_changed()
         self._update_matrix_display()
 
+    # ── Tooltips ──────────────────────────────────────────────
+
+    def _setup_tooltips(self):
+        """Fügt Tooltips zu allen wichtigen UI-Elementen hinzu."""
+        # Modus-Auswahl
+        for child in self.perm_frame.winfo_children():
+            if isinstance(child, ttk.Frame):
+                for widget in child.winfo_children():
+                    if isinstance(widget, ttk.Combobox):
+                        ToolTip(widget, "Wähle den Quell-Kanal für diesen Ausgangskanal.\n"
+                                "Beispiel: R←B tauscht Rot und Blau.")
+
+        # Mix-Matrix Slider
+        for out_ch, row in enumerate(self.mix_scales):
+            ch_names = ['Rot', 'Grün', 'Blau']
+            for in_ch, scale in enumerate(row):
+                ToolTip(scale, f"Anteil von {ch_names[in_ch]} im "
+                        f"{ch_names[out_ch]}-Ausgang.\n"
+                        f"0.0 = kein Einfluss, 1.0 = voll")
+
+        # DCP-Einstellungen
+        ToolTip(self.camera_combo, "Kamera aus der Datenbank wählen.\n"
+                "Tippe zum Filtern. Die Farbmatrizen\n"
+                "werden automatisch übernommen.")
+
+        # Histogram
+        ToolTip(self.histogram, "RGB-Histogramm des aktuellen Bildes.\n"
+                "Rot/Grün/Blau Kanäle überlagert.")
+
+        # Canvas
+        ToolTip(self.canvas, "Mausrad: Zoom  |  Ziehen: Verschieben\n"
+                "Doppelklick: Zoom zurücksetzen\n"
+                "V: Vorher/Nachher-Split umschalten")
+
     # ── Mode / Mapping ────────────────────────────────────────
 
     def _on_mode_changed(self):
@@ -753,6 +876,12 @@ class ChannelToolApp:
         self._on_mode_changed()
 
     def _on_mix_changed(self):
+        # Prozent-Labels aktualisieren
+        if hasattr(self, 'mix_labels'):
+            for i in range(3):
+                for j in range(3):
+                    val = self.mix_vars[i][j].get()
+                    self.mix_labels[i][j].config(text=f"{int(val*100)}%")
         self._on_mapping_changed()
 
     def _normalize_mix(self):
@@ -813,8 +942,8 @@ class ChannelToolApp:
                         # Auto camera detection (#8)
                         try:
                             camera_model = raw.camera_model
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Kamera-Modell nicht aus RAW lesbar: %s", e)
                 else:
                     img = Image.open(path).convert('RGB')
                     image = np.array(img)
@@ -823,8 +952,8 @@ class ChannelToolApp:
                         exif = img.getexif()
                         if exif:
                             camera_model = exif.get(0x0110, '')  # Model tag
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("EXIF-Kamera-Erkennung fehlgeschlagen: %s", e)
 
                 # Update UI in main thread
                 self.root.after(0, lambda: self._on_image_loaded(path, image, camera_model))
@@ -979,8 +1108,9 @@ class ChannelToolApp:
                         profile.hue_sat_map_data_2 = remap_hue_sat_map(
                             self.loaded_dcp.hue_sat_map_data_2,
                             self.loaded_dcp.hue_sat_map_dims, mix)
-                except Exception:
+                except Exception as e:
                     # Fallback: pass through unchanged
+                    logger.warning("HueSatMap-Remapping fehlgeschlagen, verwende Original: %s", e)
                     profile.hue_sat_map_dims = self.loaded_dcp.hue_sat_map_dims
                     profile.hue_sat_map_data_1 = self.loaded_dcp.hue_sat_map_data_1
                     profile.hue_sat_map_data_2 = self.loaded_dcp.hue_sat_map_data_2
@@ -1211,8 +1341,8 @@ class ChannelToolApp:
         self.canvas.create_image(ox, oy, image=self.photo_image, anchor=tk.NW)
 
     def _display_split_preview(self, cw, ch, scale, disp_w, disp_h):
-        """Draw split view: left=original, right=swapped (#5)."""
-        half = cw // 2
+        """Draw split view with draggable divider: left=original, right=swapped (#5)."""
+        split_x = int(cw * self.split_position)
 
         # Original
         orig_img = Image.fromarray(self.original_image)
@@ -1222,27 +1352,43 @@ class ChannelToolApp:
         swap_img = Image.fromarray(self.preview_image)
         swap_img = swap_img.resize((max(1, disp_w), max(1, disp_h)), Image.LANCZOS)
 
-        # Combine into one image
-        combined = Image.new('RGB', (cw, ch), '#2b2b2b')
+        # Combine: left side original, right side swapped
+        combined = Image.new('RGB', (cw, ch), (43, 43, 43))
 
-        ox = int(half - disp_w / 2 + self.pan_x)
+        ox = int(cw / 2 - disp_w / 2 + self.pan_x)
         oy = int(ch / 2 - disp_h / 2 + self.pan_y)
 
-        # Paste original on left half
-        combined.paste(orig_img, (ox - half, oy))
-        # Paste swapped on right half
-        combined.paste(swap_img, (ox, oy))
+        combined.paste(orig_img, (ox, oy))
+
+        # Right side: overwrite with swapped image from split_x onwards
+        if split_x < cw:
+            swap_crop_x = max(0, split_x - ox)
+            if swap_crop_x < disp_w:
+                region = swap_img.crop((swap_crop_x, 0, disp_w, disp_h))
+                paste_x = max(split_x, ox)
+                combined.paste(region, (paste_x, oy))
 
         self.photo_image = ImageTk.PhotoImage(combined)
         self.canvas.delete('all')
         self.canvas.create_image(0, 0, image=self.photo_image, anchor=tk.NW)
 
-        # Divider line
-        self.canvas.create_line(half, 0, half, ch, fill='#ffffff', width=2)
-        self.canvas.create_text(half - 40, 15, text="Vorher", fill='#aaaaaa',
-                                font=('Arial', 10))
-        self.canvas.create_text(half + 40, 15, text="Nachher", fill='#aaaaaa',
-                                font=('Arial', 10))
+        # Divider line (draggable)
+        self.canvas.create_line(split_x, 0, split_x, ch,
+                                fill='#ffffff', width=2, tags='divider')
+        # Drag handle
+        handle_y = ch // 2
+        self.canvas.create_oval(split_x - 8, handle_y - 8, split_x + 8, handle_y + 8,
+                                fill='#ffffff', outline='#888888', width=2, tags='divider')
+        self.canvas.create_line(split_x - 3, handle_y - 3, split_x - 3, handle_y + 3,
+                                fill='#666', tags='divider')
+        self.canvas.create_line(split_x + 3, handle_y - 3, split_x + 3, handle_y + 3,
+                                fill='#666', tags='divider')
+
+        # Labels
+        self.canvas.create_text(split_x - 30, 15, text="Vorher", fill='#cccccc',
+                                font=('Arial', 9, 'bold'))
+        self.canvas.create_text(split_x + 30, 15, text="Nachher", fill='#cccccc',
+                                font=('Arial', 9, 'bold'))
 
     def _on_canvas_resize(self, event):
         if self.preview_image is not None:
@@ -1267,9 +1413,23 @@ class ChannelToolApp:
         self._display_preview()
 
     def _on_pan_start(self, event):
+        # Prüfe ob Split-Divider angeklickt wurde
+        if self.split_view.get() and self.original_image is not None:
+            cw = self.canvas.winfo_width()
+            split_x = int(cw * self.split_position)
+            if abs(event.x - split_x) < 15:
+                self._split_dragging = True
+                self.canvas.config(cursor='sb_h_double_arrow')
+                return
+        self._split_dragging = False
         self._drag_start = (event.x, event.y, self.pan_x, self.pan_y)
 
     def _on_pan_move(self, event):
+        if self._split_dragging:
+            cw = self.canvas.winfo_width()
+            self.split_position = max(0.05, min(0.95, event.x / cw))
+            self._display_preview()
+            return
         if self._drag_start is None:
             return
         sx, sy, spx, spy = self._drag_start
@@ -1278,6 +1438,9 @@ class ChannelToolApp:
         self._display_preview()
 
     def _on_pan_end(self, event):
+        if self._split_dragging:
+            self._split_dragging = False
+            self.canvas.config(cursor='')
         self._drag_start = None
 
     def _reset_zoom(self):
@@ -1286,6 +1449,30 @@ class ChannelToolApp:
         self.pan_y = 0.0
         if self.preview_image is not None:
             self._display_preview()
+
+    def _zoom_in(self):
+        """Zoom um einen Schritt hinein (+)."""
+        self.zoom_level = min(20.0, self.zoom_level * 1.25)
+        if self.preview_image is not None:
+            self._display_preview()
+
+    def _zoom_out(self):
+        """Zoom um einen Schritt heraus (-)."""
+        self.zoom_level = max(0.1, self.zoom_level / 1.25)
+        if self.preview_image is not None:
+            self._display_preview()
+
+    def _reset_to_identity(self):
+        """Setzt Kanaltausch auf Identität zurück (Escape)."""
+        self.mix_mode.set(False)
+        self.r_var.set(0)
+        self.g_var.set(1)
+        self.b_var.set(2)
+        self.combo_r.current(0)
+        self.combo_g.current(1)
+        self.combo_b.current(2)
+        self._on_mode_changed()
+        self._update_status("Zurückgesetzt auf RGB (Identität).")
 
     # ── Histogram (#6) ────────────────────────────────────────
 
@@ -1299,6 +1486,41 @@ class ChannelToolApp:
             self._update_histogram()
         else:
             self.histogram.pack_forget()
+
+    def _on_histogram_toggle_key(self):
+        """Toggle Histogramm mit Taste H."""
+        self.show_histogram.set(not self.show_histogram.get())
+        self._on_histogram_toggle()
+
+    # ── Belichtungskorrektur ─────────────────────────────────
+
+    def _on_exposure_changed(self, val=None):
+        """Wendet Belichtungskorrektur auf das Vorschaubild an."""
+        if self.original_image is None:
+            return
+        ev = self.exposure_var.get()
+        self.exposure_label.config(text=f"{ev:+.1f} EV")
+
+        # Kanaltausch anwenden
+        mix = self._get_mix_matrix()
+        swapped = apply_to_image(self.original_image, mix)
+
+        # Belichtungskorrektur: Multiplikator = 2^EV
+        if abs(ev) > 0.05:
+            factor = 2.0 ** ev
+            adjusted = np.clip(swapped.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+            self.preview_image = adjusted
+        else:
+            self.preview_image = swapped
+
+        self._display_preview()
+        self._update_histogram()
+
+    def _reset_exposure(self):
+        """Setzt Belichtung auf 0 zurück."""
+        self.exposure_var.set(0.0)
+        self.exposure_label.config(text="0.0 EV")
+        self._on_mapping_changed()
 
     # ── View ──
 
@@ -1394,8 +1616,8 @@ class ChannelToolApp:
                     from npc_io import read_npc
                     pc = read_npc(path)
                     NikonPresetCreatorDialog(self.root, self, pc)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("NPC-Datei konnte nicht geladen werden: %s", e)
                 return
             elif ext in ('.nef', '.nrw') and HAS_NEF_EXTRACT:
                 self._load_image_threaded(path)
@@ -1473,11 +1695,10 @@ class ChannelToolApp:
     # ── Style Transfer ────────────────────────────────────────
 
     def _analyze_style(self):
-        """Analysiert den Bildstil des aktuell geladenen Bildes."""
+        """Analysiert den Bildstil des aktuell geladenen Bildes (im Hintergrund)."""
         if not HAS_STYLE:
             return
         if self.original_image is None:
-            # Bild laden falls keins da ist
             path = filedialog.askopenfilename(
                 title="Referenzbild für Stil-Analyse öffnen",
                 filetypes=[("Alle Bilder", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp")])
@@ -1489,11 +1710,22 @@ class ChannelToolApp:
             path = self.current_file or "Aktuelles Bild"
 
         self._update_status("Analysiere Bildstil…")
-        self.root.update()
+        progress = ProgressDialog(self.root, "Stil-Analyse", maximum=100)
+        progress.update(30, "Berechne Tonwerte und Farbverteilung…")
 
-        style = analyze_image(img, os.path.basename(path).split('.')[0])
-        StyleResultDialog(self.root, self, style)
-        self._update_status("Stil-Analyse abgeschlossen.")
+        def _run():
+            try:
+                style = analyze_image(img, os.path.basename(path).split('.')[0])
+                self.root.after(0, lambda: (
+                    progress.close(),
+                    StyleResultDialog(self.root, self, style),
+                    self._update_status("Stil-Analyse abgeschlossen.")))
+            except Exception as e:
+                self.root.after(0, lambda: (
+                    progress.close(),
+                    messagebox.showerror("Fehler", f"Stil-Analyse fehlgeschlagen:\n{e}")))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _transfer_style(self):
         """Überträgt den Stil eines Referenzbildes auf das aktuelle Bild."""
@@ -1572,16 +1804,6 @@ class ChannelToolApp:
         """Öffnet den Fujifilm-Rezept-Konverter."""
         if HAS_FUJI:
             FujiRecipeDialog(self.root, self)
-
-    def _create_canon_sony_preset(self):
-        """Canon/Sony Preset erstellen (#3)."""
-        if not HAS_CANON_SONY:
-            return
-        messagebox.showinfo("Canon/Sony Presets",
-            "Canon Picture Styles und Sony Creative Looks\n"
-            "können als Lightroom XMP-Presets exportiert werden.\n\n"
-            "Wähle einen Basisstil und passe die Parameter an.")
-        # TODO: Full dialog like NikonPresetCreatorDialog
 
     # ── 3D LUT Export (#1) ──
 
@@ -2023,8 +2245,8 @@ class ChannelToolApp:
                 name = bytes(vals[8:28]).decode('ascii', errors='replace').rstrip('\x00').strip()
                 base = bytes(vals[28:48]).decode('ascii', errors='replace').rstrip('\x00').strip()
                 info_lines.append(f"Picture Control: {name} ({base})")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Erweiterte EXIF-Info nicht verfügbar: %s", e)
 
         messagebox.showinfo("Kamera-Info", "\n".join(info_lines))
 
@@ -2479,176 +2701,178 @@ class ChannelToolApp:
         else:
             self._load_image_threaded(path)
 
+    def _on_close(self):
+        """Speichert Fensterposition und beendet die Anwendung."""
+        try:
+            config = _load_config()
+            config["window_geometry"] = self.root.geometry()
+            config["show_histogram"] = self.show_histogram.get()
+            config["split_position"] = self.split_position
+            _save_config(config)
+        except Exception as e:
+            logger.debug("Config speichern fehlgeschlagen: %s", e)
+        self.root.destroy()
+
     # ── Export All ───────────────────────────────────────────
 
     def _export_all(self):
-        """Exportiert DCP + XMP + LUT + ICC auf einmal."""
-        profile = self._build_dcp_profile()
-        if not profile:
+        """Öffnet den kombinierten Export-Dialog mit Formatauswahl und Fortschritt."""
+        ExportAllDialog(self.root, self)
+
+    # ── Vorher/Nachher-Vergleich speichern ──
+
+    def _save_comparison(self):
+        """Speichert ein Side-by-side Vergleichsbild (Vorher | Nachher)."""
+        if self.original_image is None or self.preview_image is None:
+            messagebox.showinfo("Info", "Kein Bild geladen.")
             return
-        mix = self._get_mix_matrix()
 
-        out_dir = filedialog.askdirectory(title="Exportordner wählen")
-        if not out_dir:
+        path = filedialog.asksaveasfilename(
+            title="Vergleichsbild speichern", defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")])
+        if not path:
             return
 
-        base = f"{profile.camera_model.replace(' ', '_')}_{mix.name}"
-        results = []
-        errors = []
-
-        # DCP
         try:
-            p = os.path.join(out_dir, f"{base}.dcp")
-            DCPWriter().write(p, profile)
-            results.append(f"DCP: {os.path.basename(p)}")
+            orig = Image.fromarray(self.original_image)
+            swap = Image.fromarray(self.preview_image)
+            w, h = orig.size
+
+            # Side-by-side mit Trennlinie
+            gap = 4
+            combined = Image.new('RGB', (w * 2 + gap, h), (40, 40, 40))
+            combined.paste(orig, (0, 0))
+            combined.paste(swap, (w + gap, 0))
+
+            combined.save(path, quality=95)
+            self._update_status(f"Vergleichsbild gespeichert: {path}")
         except Exception as e:
-            errors.append(f"DCP: {e}")
+            messagebox.showerror("Fehler", f"Speichern fehlgeschlagen:\n{e}")
 
-        # XMP
-        if HAS_XMP:
-            try:
-                from xmp_export import write_xmp_preset
-                p = os.path.join(out_dir, f"{base}.xmp")
-                write_xmp_preset(p, profile.profile_name, profile.camera_model)
-                results.append(f"XMP: {os.path.basename(p)}")
-            except Exception as e:
-                errors.append(f"XMP: {e}")
+    # ── Mix-Preset speichern/laden (.dct) ──
 
-        # LUT
-        if HAS_LUT:
-            try:
-                p = os.path.join(out_dir, f"{base}.cube")
-                lut = mix_matrix_to_lut(mix.matrix, size=33, title=mix.name)
-                write_cube_lut(p, lut, title=f"DNG Channel Tool - {mix.name}")
-                results.append(f"LUT: {os.path.basename(p)}")
-            except Exception as e:
-                errors.append(f"LUT: {e}")
+    def _save_mix_preset(self):
+        """Speichert die aktuelle Mix-Matrix als JSON-Preset (.dct)."""
+        mix = self._get_mix_matrix()
+        path = filedialog.asksaveasfilename(
+            title="Mix-Preset speichern", defaultextension=".dct",
+            initialfile=f"{mix.name}.dct",
+            filetypes=[("DNG Channel Tool Preset", "*.dct"), ("JSON", "*.json")])
+        if not path:
+            return
 
-        # ICC
-        if HAS_ICC:
-            try:
-                p = os.path.join(out_dir, f"{base}.icc")
-                channel_swap_to_icc(p, mix.matrix,
-                                    f"DNG Channel Tool {mix.name}")
-                results.append(f"ICC: {os.path.basename(p)}")
-            except Exception as e:
-                errors.append(f"ICC: {e}")
+        preset = {
+            "format": "dng-channel-tool-preset",
+            "version": 1,
+            "name": mix.name,
+            "mix_mode": self.mix_mode.get(),
+            "matrix": mix.matrix.tolist(),
+            "profile_name": self.profile_name_var.get(),
+            "camera": self.manual_camera_var.get(),
+        }
 
-        msg = f"Exportiert nach: {out_dir}\n\n" + "\n".join(results)
-        if errors:
-            msg += "\n\nFehler:\n" + "\n".join(errors)
-        messagebox.showinfo("Export abgeschlossen", msg)
-        self._update_status(f"Export: {len(results)} Dateien in {out_dir}")
+        try:
+            with open(path, 'w') as f:
+                json.dump(preset, f, indent=2)
+            self._update_status(f"Preset gespeichert: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Speichern fehlgeschlagen:\n{e}")
+
+    def _load_mix_preset(self):
+        """Lädt ein Mix-Preset (.dct) und wendet es an."""
+        path = filedialog.askopenfilename(
+            title="Mix-Preset laden",
+            filetypes=[("DNG Channel Tool Preset", "*.dct"), ("JSON", "*.json"),
+                       ("Alle Dateien", "*.*")])
+        if not path:
+            return
+
+        try:
+            with open(path, 'r') as f:
+                preset = json.load(f)
+
+            if preset.get("format") != "dng-channel-tool-preset":
+                messagebox.showwarning("Format",
+                    "Die Datei scheint kein gültiges DNG Channel Tool Preset zu sein.")
+                return
+
+            matrix = np.array(preset["matrix"])
+            if matrix.shape != (3, 3):
+                messagebox.showerror("Fehler", "Ungültige Matrix-Dimension.")
+                return
+
+            self._push_undo("Preset laden")
+            self.mix_mode.set(True)
+            for i in range(3):
+                for j in range(3):
+                    self.mix_vars[i][j].set(float(matrix[i, j]))
+
+            if "profile_name" in preset:
+                self.profile_name_var.set(preset["profile_name"])
+            if "camera" in preset:
+                self.manual_camera_var.set(preset["camera"])
+
+            self._on_mode_changed()
+            self._update_status(f"Preset geladen: {preset.get('name', os.path.basename(path))}")
+
+        except json.JSONDecodeError:
+            messagebox.showerror("Fehler", "Datei ist kein gültiges JSON.")
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Laden fehlgeschlagen:\n{e}")
+
+    # ── Bild drehen / spiegeln ──
+
+    def _rotate_image(self, degrees: int):
+        """Dreht das Bild um die angegebenen Grad (90, -90, 180)."""
+        if self.original_image is None:
+            return
+        self._push_undo(f"Drehen {degrees}°")
+
+        # numpy rot90: k=1 ist 90° gegen Uhrzeigersinn
+        k = degrees // 90
+        self.original_image = np.rot90(self.original_image, k=-k)
+        mix = self._get_mix_matrix()
+        self.preview_image = apply_to_image(self.original_image, mix)
+        self._reset_zoom()
+        self._display_preview()
+        self._update_histogram()
+        self._update_status(f"Bild gedreht: {degrees}°")
+
+    def _flip_image(self, direction: str):
+        """Spiegelt das Bild horizontal ('h') oder vertikal ('v')."""
+        if self.original_image is None:
+            return
+        label = "Horizontal" if direction == 'h' else "Vertikal"
+        self._push_undo(f"Spiegeln {label}")
+
+        if direction == 'h':
+            self.original_image = np.fliplr(self.original_image).copy()
+        else:
+            self.original_image = np.flipud(self.original_image).copy()
+
+        mix = self._get_mix_matrix()
+        self.preview_image = apply_to_image(self.original_image, mix)
+        self._display_preview()
+        self._update_histogram()
+        self._update_status(f"Bild gespiegelt: {label}")
+
+    # ── Tonkurven-Editor & Crop ──────────────────────────────
+
+    def _open_tone_curve_dialog(self):
+        """Öffnet den interaktiven Tonkurven-Editor."""
+        ToneCurveDialog(self.root, self)
+
+    def _open_crop_dialog(self):
+        """Öffnet das Crop-Werkzeug."""
+        CropDialog(self.root, self)
 
     # ── Canon/Sony Preset ────────────────────────────────────
 
     def _create_canon_sony_preset(self):
-        """Canon Picture Style / Sony Creative Look Dialog."""
+        """Canon Picture Style / Sony Creative Look Dialog (vollständig)."""
         if not HAS_CANON_SONY:
             return
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Canon/Sony Preset erstellen")
-        dlg.geometry("520x460")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        nb = ttk.Notebook(dlg)
-        nb.pack(fill='both', expand=True, padx=10, pady=10)
-
-        # ── Canon Tab ──
-        canon_frame = ttk.Frame(nb, padding=10)
-        nb.add(canon_frame, text="Canon Picture Style")
-
-        ttk.Label(canon_frame, text="Basis-Stil:").grid(row=0, column=0, sticky='w')
-        canon_style_var = tk.StringVar(value=CANON_BASE_STYLES[0])
-        ttk.Combobox(canon_frame, textvariable=canon_style_var,
-                     values=CANON_BASE_STYLES, state='readonly',
-                     width=20).grid(row=0, column=1, sticky='w', padx=5)
-
-        canon_params = {}
-        canon_defs = [
-            ("Schärfe", "sharpness", 0, 7, 3),
-            ("Kontrast", "contrast", -4, 4, 0),
-            ("Sättigung", "saturation", -4, 4, 0),
-            ("Farbton", "color_tone", -4, 4, 0),
-        ]
-        for i, (label, key, lo, hi, default) in enumerate(canon_defs, start=1):
-            ttk.Label(canon_frame, text=f"{label}:").grid(row=i, column=0, sticky='w')
-            var = tk.IntVar(value=default)
-            canon_params[key] = var
-            ttk.Scale(canon_frame, from_=lo, to=hi, variable=var,
-                      orient='horizontal', length=200).grid(row=i, column=1, padx=5)
-            ttk.Label(canon_frame, textvariable=var, width=4).grid(row=i, column=2)
-
-        def _canon_export_xmp():
-            style = CanonPictureStyle(
-                base_style=canon_style_var.get(),
-                sharpness=canon_params['sharpness'].get(),
-                contrast=canon_params['contrast'].get(),
-                saturation=canon_params['saturation'].get(),
-                color_tone=canon_params['color_tone'].get(),
-            )
-            path = filedialog.asksaveasfilename(
-                title="Canon XMP speichern", defaultextension=".xmp",
-                initialfile=f"Canon_{style.base_style}.xmp",
-                filetypes=[("XMP-Preset", "*.xmp")], parent=dlg)
-            if path:
-                canon_to_xmp(style, path)
-                messagebox.showinfo("Erfolg", f"Canon Preset exportiert:\n{os.path.basename(path)}", parent=dlg)
-
-        ttk.Button(canon_frame, text="Als XMP exportieren…",
-                   command=_canon_export_xmp).grid(row=6, column=0, columnspan=3, pady=15)
-
-        # ── Sony Tab ──
-        sony_frame = ttk.Frame(nb, padding=10)
-        nb.add(sony_frame, text="Sony Creative Look")
-
-        ttk.Label(sony_frame, text="Basis-Look:").grid(row=0, column=0, sticky='w')
-        sony_look_var = tk.StringVar(value=SONY_BASE_LOOKS[0])
-        ttk.Combobox(sony_frame, textvariable=sony_look_var,
-                     values=SONY_BASE_LOOKS, state='readonly',
-                     width=20).grid(row=0, column=1, sticky='w', padx=5)
-
-        sony_params = {}
-        sony_defs = [
-            ("Kontrast", "contrast", -9, 9, 0),
-            ("Lichter", "highlights", -9, 9, 0),
-            ("Schatten", "shadows", -9, 9, 0),
-            ("Verblassen", "fade", 0, 9, 0),
-            ("Sättigung", "saturation", -9, 9, 0),
-            ("Schärfe", "sharpness", -9, 9, 0),
-            ("Klarheit", "clarity", -9, 9, 0),
-        ]
-        for i, (label, key, lo, hi, default) in enumerate(sony_defs, start=1):
-            ttk.Label(sony_frame, text=f"{label}:").grid(row=i, column=0, sticky='w')
-            var = tk.IntVar(value=default)
-            sony_params[key] = var
-            ttk.Scale(sony_frame, from_=lo, to=hi, variable=var,
-                      orient='horizontal', length=200).grid(row=i, column=1, padx=5)
-            ttk.Label(sony_frame, textvariable=var, width=4).grid(row=i, column=2)
-
-        def _sony_export_xmp():
-            look = SonyCreativeLook(
-                base_look=sony_look_var.get(),
-                contrast=sony_params['contrast'].get(),
-                highlights=sony_params['highlights'].get(),
-                shadows=sony_params['shadows'].get(),
-                fade=sony_params['fade'].get(),
-                saturation=sony_params['saturation'].get(),
-                sharpness=sony_params['sharpness'].get(),
-                clarity=sony_params['clarity'].get(),
-            )
-            path = filedialog.asksaveasfilename(
-                title="Sony XMP speichern", defaultextension=".xmp",
-                initialfile=f"Sony_{look.base_look}.xmp",
-                filetypes=[("XMP-Preset", "*.xmp")], parent=dlg)
-            if path:
-                sony_to_xmp(look, path)
-                messagebox.showinfo("Erfolg", f"Sony Preset exportiert:\n{os.path.basename(path)}", parent=dlg)
-
-        ttk.Button(sony_frame, text="Als XMP exportieren…",
-                   command=_sony_export_xmp).grid(row=9, column=0, columnspan=3, pady=15)
+        CanonSonyPresetDialog(self.root, self)
 
 
 # ── CLI Mode ─────────────────────────────────────────────────
@@ -2683,6 +2907,16 @@ def parse_args():
     parser.add_argument("--export-lut", metavar="PATH", help="3D LUT exportieren")
     parser.add_argument("--export-icc", metavar="PATH", help="ICC-Profil exportieren")
     parser.add_argument("--export-image", metavar="PATH", help="Bild mit Swap speichern")
+    parser.add_argument("--input-dir", metavar="DIR",
+                        help="Batch: Alle Bilder im Ordner verarbeiten")
+    parser.add_argument("--output-dir", metavar="DIR",
+                        help="Batch: Ausgabeordner (mit --input-dir)")
+    parser.add_argument("--preset", metavar="PATH",
+                        help="Mix-Preset laden (.dct JSON-Datei)")
+    parser.add_argument("--list-cameras", action="store_true",
+                        help="Alle verfügbaren Kameramodelle auflisten")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Nur anzeigen was gemacht würde, ohne zu schreiben")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug-Ausgabe")
     return parser.parse_args()
 
@@ -2691,8 +2925,37 @@ def cli_main(args):
     """Headless-Modus ohne GUI."""
     setup_logging(level="DEBUG" if args.verbose else "INFO")
 
+    # --list-cameras: Kameramodelle auflisten
+    if args.list_cameras:
+        dnglab_path = find_dnglab_path()
+        if not dnglab_path:
+            print("dnglab nicht gefunden. Bitte dnglab-Repository als"
+                  " Geschwister-Verzeichnis ablegen.", file=sys.stderr)
+            sys.exit(1)
+        cameras = load_camera_database(dnglab_path)
+        print(f"{len(cameras)} Kameras gefunden:\n")
+        for cam in sorted(cameras, key=lambda c: c.display_name):
+            matrices = []
+            if cam.color_matrix_a is not None:
+                matrices.append("A")
+            if cam.color_matrix_d65 is not None:
+                matrices.append("D65")
+            print(f"  {cam.display_name:40s} [{', '.join(matrices)}]")
+        return
+
+    # --preset: Mix-Preset laden
+    if args.preset:
+        try:
+            with open(args.preset, 'r') as f:
+                preset = json.load(f)
+            matrix = np.array(preset["matrix"])
+            mix = MixMatrix(matrix=matrix.reshape(3, 3))
+            print(f"Preset geladen: {preset.get('name', args.preset)}")
+        except Exception as e:
+            print(f"FEHLER: Preset konnte nicht geladen werden: {e}", file=sys.stderr)
+            sys.exit(1)
     # Mix-Matrix bestimmen
-    if args.swap:
+    elif args.swap:
         perm = SWAP_ALIASES[args.swap]
         mapping = ChannelMapping.from_permutation(perm)
         mix = mapping.to_mix_matrix()
@@ -2776,6 +3039,40 @@ def cli_main(args):
         Image.fromarray(result).save(args.export_image)
         print(f"Bild gespeichert: {args.export_image}")
 
+    # Batch-Verarbeitung über CLI
+    if args.input_dir:
+        output_dir = args.output_dir or os.path.join(args.input_dir, 'output')
+        exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp',
+                '.dng', '.cr2', '.cr3', '.nef', '.arw'}
+        files = [f for f in os.listdir(args.input_dir)
+                 if os.path.splitext(f)[1].lower() in exts]
+
+        if not files:
+            print(f"Keine Bilddateien in {args.input_dir} gefunden.")
+            return
+
+        if args.dry_run:
+            print(f"Batch (dry-run): {len(files)} Dateien")
+            print(f"Ausgabe: {output_dir}")
+            for f in files:
+                print(f"  {f} → {os.path.splitext(f)[0]}.png")
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+        count = 0
+        for f in files:
+            try:
+                path = os.path.join(args.input_dir, f)
+                img = np.array(Image.open(path).convert('RGB'))
+                result = apply_to_image(img, mix)
+                out = os.path.join(output_dir, os.path.splitext(f)[0] + '.png')
+                Image.fromarray(result).save(out)
+                count += 1
+                print(f"  [{count}/{len(files)}] {f}")
+            except Exception as e:
+                print(f"  FEHLER bei {f}: {e}", file=sys.stderr)
+        print(f"\nBatch fertig: {count}/{len(files)} Dateien → {output_dir}")
+
 
 # ── Main ──────────────────────────────────────────────────────
 
@@ -2783,13 +3080,21 @@ def main():
     args = parse_args()
 
     has_cli = any([args.export_dcp, args.export_xmp, args.export_lut,
-                   args.export_icc, args.export_image])
+                   args.export_icc, args.export_image, args.list_cameras,
+                   args.input_dir])
     if has_cli:
         cli_main(args)
         return
 
     setup_logging()
     logger.info("DNG Channel Tool startet")
+
+    # High-DPI Support (muss vor Tk() aufgerufen werden)
+    try:
+        from platform_paths import setup_high_dpi
+        setup_high_dpi()
+    except ImportError:
+        pass
 
     root = tk.Tk()
 

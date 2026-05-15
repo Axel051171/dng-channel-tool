@@ -86,9 +86,13 @@ def _parse_toml_simple(filepath: str) -> dict:
     return result
 
 
+_camera_cache: Dict[str, Tuple[float, List[CameraInfo]]] = {}
+
+
 def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
     """
     Load camera database from dnglab's rawler/data/cameras/ directory.
+    Verwendet einen Cache: Nur neu geladen wenn sich Dateien geändert haben.
 
     Args:
         dnglab_path: Path to dnglab repository root
@@ -101,6 +105,16 @@ def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
 
     if not os.path.isdir(cameras_dir):
         return cameras
+
+    # Cache prüfen: mtime des Verzeichnisses
+    try:
+        dir_mtime = os.path.getmtime(cameras_dir)
+        if cameras_dir in _camera_cache:
+            cached_mtime, cached_cameras = _camera_cache[cameras_dir]
+            if cached_mtime >= dir_mtime:
+                return cached_cameras
+    except OSError:
+        pass
 
     for brand_dir in sorted(os.listdir(cameras_dir)):
         brand_path = os.path.join(cameras_dir, brand_dir)
@@ -138,8 +152,16 @@ def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
                 if cam.color_matrix_a is not None or cam.color_matrix_d65 is not None:
                     cameras.append(cam)
 
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    "Kamera-Datenbank: Eintrag übersprungen: %s", e)
                 continue
+
+    # Cache aktualisieren
+    try:
+        _camera_cache[cameras_dir] = (os.path.getmtime(cameras_dir), cameras)
+    except OSError:
+        pass
 
     return cameras
 

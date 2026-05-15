@@ -141,8 +141,9 @@ def extract_camera_jpeg(raw_path: str) -> Optional[np.ndarray]:
                 import io
                 img = Image.open(io.BytesIO(thumb.data)).convert('RGB')
                 return np.array(img)
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("JPEG-Extraktion fehlgeschlagen: %s", e)
     return None
 
 
@@ -165,7 +166,9 @@ def compare_jpeg_vs_raw(raw_path: str) -> Optional[Tuple[np.ndarray, np.ndarray]
                 no_auto_bright=True,
             )
         return (camera_jpeg, raw_dev)
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("RAW-Entwicklung fehlgeschlagen: %s", e)
         return None
 
 

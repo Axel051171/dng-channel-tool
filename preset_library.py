@@ -24,14 +24,22 @@ class PresetEntry:
 
 
 def scan_adobe_presets() -> List[PresetEntry]:
-    """Scannt alle Adobe Camera Raw Presets."""
+    """Scannt alle Adobe Camera Raw Presets (plattformübergreifend)."""
     entries = []
-    appdata = os.environ.get('APPDATA', '')
-    if not appdata:
-        return entries
+
+    # Plattformübergreifende Pfade
+    try:
+        from platform_paths import get_lightroom_preset_dir, get_adobe_profile_dir
+        settings_dir = str(get_lightroom_preset_dir())
+        profiles_dir = get_adobe_profile_dir()
+    except ImportError:
+        appdata = os.environ.get('APPDATA', '')
+        if not appdata:
+            return entries
+        settings_dir = os.path.join(appdata, 'Adobe', 'CameraRaw', 'Settings')
+        profiles_dir = os.path.join(appdata, 'Adobe', 'CameraRaw', 'CameraProfiles')
 
     # XMP Presets (Settings)
-    settings_dir = os.path.join(appdata, 'Adobe', 'CameraRaw', 'Settings')
     if os.path.isdir(settings_dir):
         for root, dirs, files in os.walk(settings_dir):
             for f in files:
@@ -46,7 +54,6 @@ def scan_adobe_presets() -> List[PresetEntry]:
                     ))
 
     # DCP Profiles (CameraProfiles)
-    profiles_dir = os.path.join(appdata, 'Adobe', 'CameraRaw', 'CameraProfiles')
     if os.path.isdir(profiles_dir):
         for root, dirs, files in os.walk(profiles_dir):
             for f in files:
@@ -160,8 +167,8 @@ def get_preset_info(entry: PresetEntry) -> dict:
             info.update(_parse_dcp_info(entry.filepath))
         elif entry.format in ("NPC", "NP3", "NCP"):
             info.update(_parse_npc_info(entry.filepath))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug("Preset-Info nicht lesbar: %s", e)
 
     return info
 
@@ -185,8 +192,8 @@ def _parse_xmp_info(filepath: str) -> dict:
         wb = re.search(r'crs:WhiteBalance="([^"]*)"', content)
         if wb:
             info['white_balance'] = wb.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug("Preset-Info nicht lesbar: %s", e)
     return info
 
 
@@ -199,8 +206,8 @@ def _parse_dcp_info(filepath: str) -> dict:
         info['camera_model'] = profile.camera_model
         info['profile_name'] = profile.profile_name
         info['dual_illuminant'] = profile.has_dual_illuminant()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug("Preset-Info nicht lesbar: %s", e)
     return info
 
 
@@ -213,8 +220,8 @@ def _parse_npc_info(filepath: str) -> dict:
         info['pc_name'] = pc.name
         info['pc_base'] = pc.base
         info['tone_curve_points'] = len(pc.tone_curve)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug("Preset-Info nicht lesbar: %s", e)
     return info
 
 

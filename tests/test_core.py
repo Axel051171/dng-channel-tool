@@ -1677,5 +1677,304 @@ D65 = [0.60, 0.15, 0.20, 0.25, 0.70, 0.05, 0.03, -0.10, 0.95]
         assert result is None or os.path.isdir(result)
 
 
+# ═══════════════════════════════════════════════════════════
+#  gui_widgets.py - ToolTip, ProgressDialog
+# ═══════════════════════════════════════════════════════════
+
+class TestToolTip:
+    """Tests für ToolTip (ohne Tk Root)."""
+
+    def test_import(self):
+        from gui_widgets import ToolTip
+        assert ToolTip is not None
+
+    def test_progress_dialog_import(self):
+        from gui_widgets import ProgressDialog
+        assert ProgressDialog is not None
+
+
+# ═══════════════════════════════════════════════════════════
+#  camera_presets.py - Canon/Sony Konvertierung
+# ═══════════════════════════════════════════════════════════
+
+class TestCanonPresets:
+    """Tests für Canon Picture Style Konvertierung."""
+
+    def test_canon_style_creation(self):
+        from camera_presets import CanonPictureStyle
+        style = CanonPictureStyle(
+            name="Test", base_style="Standard",
+            sharpness=5, contrast=2, saturation=-1, color_tone=0)
+        assert style.name == "Test"
+        assert style.contrast == 2
+        assert not style.is_monochrome
+
+    def test_canon_monochrome(self):
+        from camera_presets import CanonPictureStyle
+        style = CanonPictureStyle(base_style="Monochrome")
+        assert style.is_monochrome
+
+    def test_canon_to_sony(self):
+        from camera_presets import CanonPictureStyle, canon_to_sony
+        style = CanonPictureStyle(contrast=2, saturation=-1, sharpness=7)
+        look = canon_to_sony(style)
+        assert -9 <= look.contrast <= 9
+        assert -9 <= look.saturation <= 9
+
+    def test_canon_to_nikon(self):
+        from camera_presets import CanonPictureStyle, canon_to_nikon_npc
+        style = CanonPictureStyle(contrast=-2, saturation=3, sharpness=8)
+        npc = canon_to_nikon_npc(style)
+        assert 0 <= npc.contrast <= 255
+        assert 0 <= npc.saturation <= 255
+
+    def test_canon_xmp_export(self):
+        from camera_presets import CanonPictureStyle, canon_to_lightroom_xmp
+        style = CanonPictureStyle(name="XmpTest", contrast=1, saturation=2)
+        with tempfile.NamedTemporaryFile(suffix='.xmp', delete=False) as f:
+            path = f.name
+        try:
+            canon_to_lightroom_xmp(style, path)
+            assert os.path.exists(path)
+            with open(path, 'r') as f:
+                content = f.read()
+            assert 'XmpTest' in content or 'Contrast' in content
+        finally:
+            os.unlink(path)
+
+    def test_canon_pf3_roundtrip(self):
+        from camera_presets import CanonPictureStyle, write_canon_pf3, read_canon_pf3
+        style = CanonPictureStyle(
+            name="RoundTrip", base_style="Standard",
+            sharpness=5, fineness=3, threshold=2,
+            contrast=1, saturation=-2, color_tone=0)
+        with tempfile.NamedTemporaryFile(suffix='.pf3', delete=False) as f:
+            path = f.name
+        try:
+            write_canon_pf3(path, style)
+            assert os.path.exists(path)
+            loaded = read_canon_pf3(path)
+            assert loaded.sharpness == 5
+        finally:
+            os.unlink(path)
+
+
+class TestSonyPresets:
+    """Tests für Sony Creative Look Konvertierung."""
+
+    def test_sony_look_creation(self):
+        from camera_presets import SonyCreativeLook
+        look = SonyCreativeLook(
+            name="VV", display_name="Vivid",
+            contrast=2, highlights=-1, saturation=4)
+        assert look.name == "VV"
+        assert not look.is_monochrome
+
+    def test_sony_bw(self):
+        from camera_presets import SonyCreativeLook
+        look = SonyCreativeLook(name="BW")
+        assert look.is_monochrome
+
+    def test_sony_to_canon(self):
+        from camera_presets import SonyCreativeLook, sony_to_canon
+        look = SonyCreativeLook(contrast=5, saturation=-3, sharpness=7)
+        style = sony_to_canon(look)
+        assert -4 <= style.contrast <= 4
+        assert -4 <= style.saturation <= 4
+
+    def test_sony_to_nikon(self):
+        from camera_presets import SonyCreativeLook, sony_to_nikon_npc
+        look = SonyCreativeLook(contrast=-4, saturation=6, clarity=3)
+        npc = sony_to_nikon_npc(look)
+        assert 0 <= npc.contrast <= 255
+        assert 0 <= npc.saturation <= 255
+
+    def test_sony_xmp_export(self):
+        from camera_presets import SonyCreativeLook, sony_to_lightroom_xmp
+        look = SonyCreativeLook(name="FL", display_name="Film",
+                                contrast=1, fade=3)
+        with tempfile.NamedTemporaryFile(suffix='.xmp', delete=False) as f:
+            path = f.name
+        try:
+            sony_to_lightroom_xmp(look, path)
+            assert os.path.exists(path)
+            with open(path, 'r') as f:
+                content = f.read()
+            assert 'Sony' in content or 'Contrast' in content
+        finally:
+            os.unlink(path)
+
+    def test_sony_xml_roundtrip(self):
+        from camera_presets import SonyCreativeLook, write_sony_look_xml, read_sony_look_xml
+        look = SonyCreativeLook(
+            name="FL", display_name="Film Test",
+            contrast=3, highlights=-2, shadows=1, fade=2,
+            saturation=-1, sharpness=4, clarity=0)
+        with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as f:
+            path = f.name
+        try:
+            write_sony_look_xml(path, look)
+            loaded = read_sony_look_xml(path)
+            assert loaded.contrast == 3
+            assert loaded.highlights == -2
+            assert loaded.fade == 2
+        finally:
+            os.unlink(path)
+
+
+class TestCrossConversion:
+    """Tests für Kreuz-Konvertierung Canon ↔ Sony ↔ Nikon."""
+
+    def test_canon_sony_roundtrip_approx(self):
+        from camera_presets import CanonPictureStyle, canon_to_sony, sony_to_canon
+        original = CanonPictureStyle(contrast=2, saturation=-2, sharpness=6)
+        look = canon_to_sony(original)
+        back = sony_to_canon(look)
+        # Nicht exakt, aber ähnlich
+        assert abs(back.contrast - original.contrast) <= 2
+        assert abs(back.saturation - original.saturation) <= 2
+
+    def test_sony_base_looks_defined(self):
+        from camera_presets import SONY_BASE_LOOKS
+        assert len(SONY_BASE_LOOKS) >= 6
+        assert "ST" in SONY_BASE_LOOKS
+        assert "VV" in SONY_BASE_LOOKS
+        assert "BW" in SONY_BASE_LOOKS
+
+    def test_canon_base_styles_defined(self):
+        from camera_presets import CANON_BASE_STYLES
+        assert "Standard" in CANON_BASE_STYLES
+        assert "Monochrome" in CANON_BASE_STYLES
+        assert len(CANON_BASE_STYLES) >= 6
+
+    def test_nikon_to_canon(self):
+        from camera_presets import nikon_to_canon
+        from npc_io import NikonPictureControlFile
+        npc = NikonPictureControlFile()
+        npc.contrast = 160
+        npc.saturation = 96
+        npc.sharpening = 200
+        style = nikon_to_canon(npc)
+        assert -4 <= style.contrast <= 4
+        assert 0 <= style.sharpness <= 10
+
+    def test_nikon_to_sony(self):
+        from camera_presets import nikon_to_sony
+        from npc_io import NikonPictureControlFile
+        npc = NikonPictureControlFile()
+        npc.contrast = 160
+        npc.saturation = 96
+        look = nikon_to_sony(npc)
+        assert -9 <= look.contrast <= 9
+        assert -9 <= look.saturation <= 9
+
+
+# ═══════════════════════════════════════════════════════════
+#  platform_paths.py
+# ═══════════════════════════════════════════════════════════
+
+class TestPlatformPaths:
+    """Tests für plattformübergreifende Pfade."""
+
+    def test_get_adobe_profile_dir(self):
+        from platform_paths import get_adobe_profile_dir
+        path = get_adobe_profile_dir()
+        assert 'Adobe' in path
+        assert 'CameraProfiles' in path
+
+    def test_get_lightroom_preset_dir(self):
+        from platform_paths import get_lightroom_preset_dir
+        path = get_lightroom_preset_dir()
+        assert 'Adobe' in str(path)
+        assert 'Settings' in str(path)
+
+    def test_find_sd_cards_returns_list(self):
+        from platform_paths import find_sd_cards
+        cards = find_sd_cards()
+        assert isinstance(cards, list)
+
+    def test_platform_detection(self):
+        from platform_paths import IS_WINDOWS, IS_MACOS, IS_LINUX
+        # Genau eine Plattform sollte True sein (oder keine auf exotischen Systemen)
+        count = sum([IS_WINDOWS, IS_MACOS, IS_LINUX])
+        assert count <= 1 or count == 1
+
+
+# ═══════════════════════════════════════════════════════════
+#  Mix-Preset (.dct) Format
+# ═══════════════════════════════════════════════════════════
+
+class TestMixPreset:
+    """Tests für das .dct Preset-Format."""
+
+    def test_preset_save_load_roundtrip(self):
+        import json
+        mix = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=float)
+        preset = {
+            "format": "dng-channel-tool-preset",
+            "version": 1,
+            "name": "RB Swap",
+            "matrix": mix.tolist(),
+        }
+        with tempfile.NamedTemporaryFile(suffix='.dct', mode='w', delete=False) as f:
+            json.dump(preset, f)
+            path = f.name
+        try:
+            with open(path, 'r') as f:
+                loaded = json.load(f)
+            assert loaded["format"] == "dng-channel-tool-preset"
+            loaded_matrix = np.array(loaded["matrix"])
+            assert loaded_matrix.shape == (3, 3)
+            assert np.allclose(loaded_matrix, mix)
+        finally:
+            os.unlink(path)
+
+
+# ═══════════════════════════════════════════════════════════
+#  camera_db.py - Caching
+# ═══════════════════════════════════════════════════════════
+
+class TestCameraDBCache:
+    """Tests für Kamera-Datenbank Caching."""
+
+    def test_cache_returns_same_on_second_call(self):
+        from camera_db import load_camera_database, find_dnglab_path
+        path = find_dnglab_path()
+        if path is None:
+            pytest.skip("dnglab nicht verfügbar")
+        cams1 = load_camera_database(path)
+        cams2 = load_camera_database(path)
+        assert len(cams1) == len(cams2)
+        assert cams1 is cams2  # Sollte dasselbe Objekt sein (Cache)
+
+
+# ═══════════════════════════════════════════════════════════
+#  CLI-Modus
+# ═══════════════════════════════════════════════════════════
+
+class TestCLI:
+    """Tests für den CLI-Modus."""
+
+    def test_swap_aliases(self):
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from main import SWAP_ALIASES
+        assert "RB" in SWAP_ALIASES
+        assert "BGR" in SWAP_ALIASES
+        assert len(SWAP_ALIASES["RB"]) == 3
+
+    def test_parse_args_defaults(self):
+        from main import parse_args
+        import sys
+        old_argv = sys.argv
+        sys.argv = ['main.py']
+        try:
+            args = parse_args()
+            assert args.input is None
+            assert args.swap is None
+            assert args.list_cameras is False
+        finally:
+            sys.argv = old_argv
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

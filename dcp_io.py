@@ -465,12 +465,16 @@ class DCPReader:
 
 
 def get_adobe_profile_dir() -> str:
-    """Get the Adobe CameraRaw camera profiles directory."""
-    appdata = os.environ.get('APPDATA', '')
-    if appdata:
-        return os.path.join(appdata, 'Adobe', 'CameraRaw', 'CameraProfiles')
-    home = os.path.expanduser('~')
-    return os.path.join(home, 'AppData', 'Roaming', 'Adobe', 'CameraRaw', 'CameraProfiles')
+    """Get the Adobe CameraRaw camera profiles directory (plattformübergreifend)."""
+    try:
+        from platform_paths import get_adobe_profile_dir as _get
+        return _get()
+    except ImportError:
+        appdata = os.environ.get('APPDATA', '')
+        if appdata:
+            return os.path.join(appdata, 'Adobe', 'CameraRaw', 'CameraProfiles')
+        home = os.path.expanduser('~')
+        return os.path.join(home, 'AppData', 'Roaming', 'Adobe', 'CameraRaw', 'CameraProfiles')
 
 
 def rewrite_dcp_camera_model(src_path: str, dest_path: str,

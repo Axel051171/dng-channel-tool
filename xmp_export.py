@@ -86,22 +86,29 @@ def write_xmp_preset(
 
 
 def get_lightroom_preset_dir() -> Path:
-    """Return the default Adobe Camera Raw preset directory on Windows.
+    """Return the default Adobe Camera Raw preset directory (plattformübergreifend).
 
-    The path is ``%APPDATA%/Adobe/CameraRaw/Settings/``.
+    Plattform-Pfade:
+        Windows: %APPDATA%/Adobe/CameraRaw/Settings/
+        macOS:   ~/Library/Application Support/Adobe/CameraRaw/Settings/
+        Linux:   ~/.config/Adobe/CameraRaw/Settings/
 
     Returns
     -------
     pathlib.Path
         Resolved preset directory (may not exist yet).
     """
-    appdata = os.environ.get("APPDATA", "")
-    if not appdata:
-        raise EnvironmentError(
-            "APPDATA environment variable is not set. "
-            "Cannot locate the Lightroom preset directory."
-        )
-    return Path(appdata) / "Adobe" / "CameraRaw" / "Settings"
+    try:
+        from platform_paths import get_lightroom_preset_dir as _get
+        return _get()
+    except ImportError:
+        appdata = os.environ.get("APPDATA", "")
+        if not appdata:
+            raise EnvironmentError(
+                "APPDATA environment variable is not set. "
+                "Cannot locate the Lightroom preset directory."
+            )
+        return Path(appdata) / "Adobe" / "CameraRaw" / "Settings"
 
 
 def install_xmp_to_lightroom(

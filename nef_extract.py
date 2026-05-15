@@ -201,8 +201,8 @@ def extract_picture_control(nef_path: str) -> NikonPictureControl:
                 thumb = raw.extract_thumb()
                 if thumb.format == rawpy.ThumbFormat.JPEG:
                     pc.preview_data = thumb.data
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).debug("Thumbnail-Extraktion fehlgeschlagen: %s", e)
 
     return pc
 

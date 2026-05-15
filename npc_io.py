@@ -404,25 +404,29 @@ def _interpolate_curve(points: List[Tuple[int, int]], num_output: int = 256) -> 
 # ── SD-Card Installation ──────────────────────────────────
 
 def find_sd_cards() -> List[str]:
-    """Findet SD-Karten/Wechseldatenträger unter Windows."""
+    """Findet SD-Karten/Wechseldatenträger (plattformübergreifend)."""
+    try:
+        from platform_paths import find_sd_cards as _find
+        return _find()
+    except ImportError:
+        pass
+    # Fallback: Windows-only
     import string
     cards = []
-    for letter in string.ascii_uppercase[3:]:  # D: onwards
+    for letter in string.ascii_uppercase[3:]:
         drive = f"{letter}:\\"
         if os.path.exists(drive):
-            # Check if it looks like a camera card
             nikon_dir = os.path.join(drive, "NIKON")
             dcim_dir = os.path.join(drive, "DCIM")
             if os.path.isdir(nikon_dir) or os.path.isdir(dcim_dir):
                 cards.append(drive)
             elif os.path.isdir(drive):
-                # Any removable drive
                 try:
                     import ctypes
                     drive_type = ctypes.windll.kernel32.GetDriveTypeW(drive)
                     if drive_type == 2:  # DRIVE_REMOVABLE
                         cards.append(drive)
-                except Exception:
+                except (AttributeError, OSError):
                     pass
     return cards
 
