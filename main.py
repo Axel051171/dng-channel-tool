@@ -218,16 +218,14 @@ class ChannelToolApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(WINDOW_TITLE)
-        # Fensterposition und Einstellungen aus Config wiederherstellen
+
+        # Config einmalig laden (vor State-Init, damit gespeicherte Werte
+        # die Defaults der Tk-Variablen setzen können).
         config = _load_config()
         geometry = config.get("window_geometry", "1280x860")
         self.root.geometry(geometry)
         self.root.minsize(900, 600)
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-        if "show_histogram" in config:
-            self.show_histogram.set(config["show_histogram"])
-        if "split_position" in config:
-            self.split_position = config["split_position"]
 
         # ── State ──
         self.original_image: Optional[np.ndarray] = None
@@ -249,22 +247,27 @@ class ChannelToolApp:
         self.mix_vars = [[tk.DoubleVar(value=1.0 if i == j else 0.0)
                           for j in range(3)] for i in range(3)]
 
-        # View state
+        # View state (Defaults aus Config übernehmen)
         self.split_view = tk.BooleanVar(value=False)
-        self.show_histogram = tk.BooleanVar(value=True)
+        self.show_histogram = tk.BooleanVar(
+            value=bool(config.get("show_histogram", True)))
         self.zoom_level = 1.0  # 1.0 = fit
         self.pan_x = 0.0
         self.pan_y = 0.0
         self._drag_start = None
         self.wb_picker_active = False  # WB-Pipette Modus
-        self.split_position = 0.5  # Vergleichs-Slider Position (0.0-1.0)
+        split_cfg = config.get("split_position", 0.5)
+        try:
+            self.split_position = max(0.05, min(0.95, float(split_cfg)))
+        except (TypeError, ValueError):
+            self.split_position = 0.5
         self._split_dragging = False
 
         # Detected camera from EXIF
         self.detected_camera: Optional[str] = None
 
-        # Recent files
-        self.recent_files: List[str] = _load_config().get("recent_files", [])[:MAX_RECENT]
+        # Recent files (verwendet bereits geladene Config statt erneut zu lesen)
+        self.recent_files: List[str] = list(config.get("recent_files", []))[:MAX_RECENT]
 
         # Undo/Redo
         self.undo_manager = UndoManager()
@@ -336,7 +339,7 @@ class ChannelToolApp:
         self._update_recent_menu()
 
         file_menu.add_separator()
-        file_menu.add_command(label="Beenden", command=self.root.quit)
+        file_menu.add_command(label="Beenden", command=self._on_close)
         menubar.add_cascade(label="Datei", menu=file_menu)
 
         # Bearbeiten (Undo/Redo)
@@ -509,36 +512,56 @@ class ChannelToolApp:
         self.root.bind('<Control-o>', lambda e: self._open_image())
         self.root.bind('<Control-s>', lambda e: self._save_image())
         self.root.bind('<Control-e>', lambda e: self._export_dcp())
+        # Buchstaben-Shortcuts müssen ignoriert werden, wenn ein Eingabe-Widget
+        # den Fokus hat (sonst wird "v" als Toggle-Split interpretiert während
+        # der Nutzer in ein Entry-Feld tippt).
+        def _typing_focus():
+            try:
+                w = self.root.focus_get()
+            except KeyError:
+                return False
+            return isinstance(w, (ttk.Entry, tk.Entry, tk.Text, ttk.Combobox, tk.Spinbox))
+
+        def _key_binding(handler):
+            """Wrappt einen Key-Handler so, dass er im Texteingabe-Fokus inaktiv ist."""
+            def _wrapped(event):
+                if _typing_focus():
+                    return None
+                return handler(event)
+            return _wrapped
+
         self.root.bind('<Control-b>', lambda e: self._open_batch_dialog())
         self.root.bind('<Control-n>', lambda e: self._extract_nef_picture_control()
                        if HAS_NEF_EXTRACT else None)
-        self.root.bind('<Control-z>', lambda e: self._undo())
-        self.root.bind('<Control-y>', lambda e: self._redo())
-        self.root.bind('<v>', lambda e: self._toggle_split())
-        self.root.bind('<V>', lambda e: self._toggle_split())
-        self.root.bind('<w>', lambda e: self._toggle_wb_picker() if HAS_WB else None)
+        # Undo/Redo: Ctrl+Z/Y in Texteingaben gehört dem Widget — nicht der App
+        self.root.bind('<Control-z>', _key_binding(lambda e: self._undo()))
+        self.root.bind('<Control-y>', _key_binding(lambda e: self._redo()))
+        self.root.bind('<v>', _key_binding(lambda e: self._toggle_split()))
+        self.root.bind('<V>', _key_binding(lambda e: self._toggle_split()))
+        self.root.bind('<w>', _key_binding(
+            lambda e: self._toggle_wb_picker() if HAS_WB else None))
         self.root.bind('<Control-l>', lambda e: self._open_preset_library()
                        if HAS_LIBRARY else None)
         self.root.bind('<Control-Shift-E>', lambda e: self._export_all())
 
-        # Schnelltasten für Swap-Presets (1-6)
+        # Schnelltasten für Swap-Presets (1-6) — nur außerhalb von Texteingaben
         preset_list = list(SWAP_PRESETS.items())
         for idx, (name, perm) in enumerate(preset_list[:6]):
             self.root.bind(str(idx + 1),
-                           lambda e, p=perm: self._apply_preset(p))
+                           _key_binding(lambda e, p=perm: self._apply_preset(p)))
 
         # Zusätzliche Shortcuts
         self.root.bind('<Escape>', lambda e: self._reset_to_identity())
-        self.root.bind('<plus>', lambda e: self._zoom_in())
-        self.root.bind('<minus>', lambda e: self._zoom_out())
+        self.root.bind('<plus>', _key_binding(lambda e: self._zoom_in()))
+        self.root.bind('<minus>', _key_binding(lambda e: self._zoom_out()))
         self.root.bind('<F5>', lambda e: self._on_mapping_changed())
-        self.root.bind('<h>', lambda e: self._on_histogram_toggle_key())
-        self.root.bind('<H>', lambda e: self._on_histogram_toggle_key())
-        self.root.bind('<r>', lambda e: self._rotate_image(90))
-        self.root.bind('<R>', lambda e: self._rotate_image(90))
-        self.root.bind('<c>', lambda e: self._open_crop_dialog())
-        self.root.bind('<t>', lambda e: self._open_tone_curve_dialog())
-        self.root.bind('<T>', lambda e: self._open_tone_curve_dialog())
+        self.root.bind('<h>', _key_binding(lambda e: self._on_histogram_toggle_key()))
+        self.root.bind('<H>', _key_binding(lambda e: self._on_histogram_toggle_key()))
+        self.root.bind('<r>', _key_binding(lambda e: self._rotate_image(90)))
+        self.root.bind('<R>', _key_binding(lambda e: self._rotate_image(90)))
+        self.root.bind('<c>', _key_binding(lambda e: self._open_crop_dialog()))
+        self.root.bind('<t>', _key_binding(lambda e: self._open_tone_curve_dialog()))
+        self.root.bind('<T>', _key_binding(lambda e: self._open_tone_curve_dialog()))
 
     # ── UI Building ───────────────────────────────────────────
 
@@ -554,15 +577,18 @@ class ChannelToolApp:
         self.canvas = tk.Canvas(left_frame, bg='#2b2b2b', highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind('<Configure>', self._on_canvas_resize)
-        self.canvas.bind('<MouseWheel>', self._on_mouse_wheel)  # Zoom #7
-        self.canvas.bind('<ButtonPress-1>', self._on_pan_start)  # Pan #7
+        self.canvas.bind('<MouseWheel>', self._on_mouse_wheel)  # Win/macOS
+        self.canvas.bind('<Button-4>', self._on_mouse_wheel)    # Linux Scroll-up
+        self.canvas.bind('<Button-5>', self._on_mouse_wheel)    # Linux Scroll-down
+        self.canvas.bind('<ButtonPress-1>', self._on_pan_start)
         self.canvas.bind('<B1-Motion>', self._on_pan_move)
         self.canvas.bind('<ButtonRelease-1>', self._on_pan_end)
         self.canvas.bind('<Double-Button-1>', lambda e: self._reset_zoom())
 
-        # Histogram (#6)
+        # Histogram (#6) — Sichtbarkeit aus Config übernehmen
         self.histogram = HistogramWidget(left_frame, height=80)
-        self.histogram.pack(fill=tk.X)
+        if self.show_histogram.get():
+            self.histogram.pack(fill=tk.X)
 
         # ── Right: Controls ──
         right_frame = ttk.Frame(main_pane, width=370)
@@ -580,14 +606,29 @@ class ChannelToolApp:
         self._scroll_canvas = canvas_scroll
 
         def _on_scroll_mousewheel(event):
-            canvas_scroll.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            return "break"  # Verhindert Weiterleitung an Bild-Canvas
+            # Plattformübergreifend: Win/macOS event.delta, Linux event.num 4/5
+            delta = getattr(event, 'delta', 0)
+            num = getattr(event, 'num', 0)
+            if delta:
+                step = int(-1 * (delta / 120)) or (-1 if delta > 0 else 1)
+            elif num == 4:
+                step = -1
+            elif num == 5:
+                step = 1
+            else:
+                return
+            canvas_scroll.yview_scroll(step, "units")
+            return "break"
 
         def _bind_scroll(event):
             canvas_scroll.bind('<MouseWheel>', _on_scroll_mousewheel)
+            canvas_scroll.bind('<Button-4>', _on_scroll_mousewheel)
+            canvas_scroll.bind('<Button-5>', _on_scroll_mousewheel)
 
         def _unbind_scroll(event):
             canvas_scroll.unbind('<MouseWheel>')
+            canvas_scroll.unbind('<Button-4>')
+            canvas_scroll.unbind('<Button-5>')
 
         scroll_frame.bind('<Enter>', _bind_scroll)
         scroll_frame.bind('<Leave>', _unbind_scroll)
@@ -927,7 +968,7 @@ class ChannelToolApp:
     def _load_image_threaded(self, path: str):
         """Load image in background thread to keep GUI responsive (Fix #3)."""
         self._update_status(f"Lade: {os.path.basename(path)}…")
-        self.root.update()
+        self.root.update_idletasks()
 
         def _load():
             try:
@@ -959,8 +1000,12 @@ class ChannelToolApp:
                 self.root.after(0, lambda: self._on_image_loaded(path, image, camera_model))
 
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Fehler", f"Datei konnte nicht geladen werden:\n{e}"))
+                # Fehlermeldung als String erfassen (Python 3 entfernt 'e'
+                # am Ende des except-Blocks, sodass der Lambda-Closure leer wäre)
+                err_msg = str(e)
+                logger.exception("Bild-Laden fehlgeschlagen: %s", path)
+                self.root.after(0, lambda msg=err_msg: messagebox.showerror(
+                    "Fehler", f"Datei konnte nicht geladen werden:\n{msg}"))
                 self.root.after(0, lambda: self._update_status("Fehler beim Laden."))
 
         thread = threading.Thread(target=_load, daemon=True)
@@ -1254,7 +1299,10 @@ class ChannelToolApp:
 
     def _undo(self):
         """Stellt den vorherigen Zustand wieder her."""
-        state = self.undo_manager.undo()
+        if self.preview_image is None:
+            return
+        current_mix = self._get_mix_matrix().matrix
+        state = self.undo_manager.undo(self.preview_image, current_mix)
         if state is not None:
             self.preview_image = state.preview_image.copy()
             # Mix-Matrix in UI wiederherstellen
@@ -1270,7 +1318,10 @@ class ChannelToolApp:
 
     def _redo(self):
         """Stellt den nächsten Zustand wieder her."""
-        state = self.undo_manager.redo()
+        if self.preview_image is None:
+            return
+        current_mix = self._get_mix_matrix().matrix
+        state = self.undo_manager.redo(self.preview_image, current_mix)
         if state is not None:
             self.preview_image = state.preview_image.copy()
             self.mix_mode.set(True)
@@ -1395,11 +1446,23 @@ class ChannelToolApp:
             self._display_preview()
 
     def _on_mouse_wheel(self, event):
-        """Zoom with mouse wheel (#7)."""
+        """Zoom with mouse wheel (cross-platform: Windows/macOS event.delta, Linux Button-4/5)."""
         if self.original_image is None:
             return
 
-        factor = 1.15 if event.delta > 0 else (1 / 1.15)
+        # Linux liefert keine delta, sondern num (4=hoch, 5=runter)
+        delta = getattr(event, 'delta', 0)
+        num = getattr(event, 'num', 0)
+        if delta:
+            up = delta > 0
+        elif num == 4:
+            up = True
+        elif num == 5:
+            up = False
+        else:
+            return
+
+        factor = 1.15 if up else (1 / 1.15)
         new_zoom = self.zoom_level * factor
         new_zoom = max(0.1, min(20.0, new_zoom))
 
@@ -1646,7 +1709,7 @@ class ChannelToolApp:
             return
 
         self._update_status(f"Extrahiere Picture Control: {os.path.basename(path)}…")
-        self.root.update()
+        self.root.update_idletasks()
 
         try:
             pc = extract_picture_control(path)
@@ -1671,10 +1734,9 @@ class ChannelToolApp:
             pc = extract_picture_control(path)
             preset_name = pc.name or "Nikon Preset"
 
-            # Direkt in Adobe installieren
-            preset_dir = os.path.join(
-                os.environ.get('APPDATA', ''),
-                'Adobe', 'CameraRaw', 'Settings', 'Nikon Picture Controls')
+            # Direkt in Adobe installieren (plattformübergreifend)
+            from platform_paths import get_lightroom_preset_dir
+            preset_dir = str(get_lightroom_preset_dir() / 'Nikon Picture Controls')
             os.makedirs(preset_dir, exist_ok=True)
 
             xmp_path = os.path.join(preset_dir, f"{preset_name}.xmp")
@@ -1741,7 +1803,7 @@ class ChannelToolApp:
             return
 
         self._update_status(f"Übertrage Stil von {os.path.basename(path)}…")
-        self.root.update()
+        self.root.update_idletasks()
 
         ref_img = np.array(Image.open(path).convert('RGB'))
         style = analyze_image(ref_img, os.path.basename(path).split('.')[0])
@@ -1779,7 +1841,7 @@ class ChannelToolApp:
             return
 
         self._update_status("Vergleiche Bilder und berechne Transformation…")
-        self.root.update()
+        self.root.update_idletasks()
 
         orig = np.array(Image.open(orig_path).convert('RGB'))
         styled = np.array(Image.open(styled_path).convert('RGB'))
@@ -1822,7 +1884,7 @@ class ChannelToolApp:
             return
 
         self._update_status("Generiere 3D LUT…")
-        self.root.update()
+        self.root.update_idletasks()
 
         try:
             lut = mix_matrix_to_lut(mix.matrix, size=33, title=mix.name)
@@ -2140,7 +2202,7 @@ class ChannelToolApp:
             return
 
         self._update_status("Extrahiere Kamera-JPEG und entwickle RAW…")
-        self.root.update()
+        self.root.update_idletasks()
 
         result = compare_jpeg_vs_raw(path)
         if result is None:
@@ -2172,7 +2234,7 @@ class ChannelToolApp:
 
         img = np.array(Image.open(path).convert('RGB'))
         self._update_status("Kalibriere mit ColorChecker…")
-        self.root.update()
+        self.root.update_idletasks()
 
         try:
             result = calibrate_from_colorchecker(img)

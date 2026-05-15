@@ -27,7 +27,6 @@ FILM_SIM_TO_ADOBE = {
     "ASTIA/SOFT": "Camera ASTIA/SOFT",
     "ASTIA": "Camera ASTIA/SOFT",
     "CLASSIC CHROME": "Camera CLASSIC CHROME",
-    "CLASSIC CHROME": "Camera CLASSIC CHROME",
     "PRO Neg. Hi": "Camera PRO Neg. Hi",
     "PRO Neg. Std": "Camera PRO Neg. Std",
     "CLASSIC Neg.": "Camera CLASSIC Neg.",
@@ -411,10 +410,9 @@ def recipe_to_nikon_pc(recipe: FujiRecipe):
 
 
 def install_recipe_to_lightroom(recipe: FujiRecipe, subfolder: str = "Fujifilm Rezepte") -> str:
-    """Installiert ein Fuji-Rezept direkt als Lightroom-Preset."""
-    preset_dir = os.path.join(
-        os.environ.get('APPDATA', ''),
-        'Adobe', 'CameraRaw', 'Settings', subfolder)
+    """Installiert ein Fuji-Rezept direkt als Lightroom-Preset (plattformübergreifend)."""
+    from platform_paths import get_lightroom_preset_dir
+    preset_dir = str(get_lightroom_preset_dir() / subfolder)
     os.makedirs(preset_dir, exist_ok=True)
 
     name = recipe.name or recipe.film_simulation

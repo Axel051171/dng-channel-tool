@@ -129,9 +129,19 @@ class DCPProfile:
 
 
 def _float_to_srational(value: float, denominator: int = 10000) -> tuple:
-    """Convert float to SRATIONAL (numerator, denominator)."""
-    numerator = int(round(value * denominator))
-    return (numerator, denominator)
+    """Convert float to SRATIONAL (numerator, denominator).
+
+    Robust gegen NaN/Inf (→ 0) und gegen int32-Overflow (→ clamping auf
+    den signed-32-Bit-Bereich). Beides würde sonst beim späteren
+    struct.pack('<ii', ...) crashen.
+    """
+    import math
+    if not math.isfinite(value):
+        return (0, denominator)
+    raw = round(value * denominator)
+    # SRATIONAL ist int32
+    raw = max(-(2 ** 31), min(2 ** 31 - 1, int(raw)))
+    return (raw, denominator)
 
 
 def _srational_to_float(num: int, den: int) -> float:

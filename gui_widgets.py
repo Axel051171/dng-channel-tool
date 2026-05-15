@@ -101,8 +101,12 @@ class HistogramWidget(tk.Canvas):
             for px, py in poly:
                 coords.extend([px, py])
 
-            self.create_polygon(coords, fill='', outline=color, width=1,
-                                stipple='gray50' if ch > 0 else '')
+            # Polygon ohne Füllung. `stipple` darf laut Tk-Doku nicht leer
+            # sein – nur setzen wenn er gebraucht wird (Kanal != Rot).
+            poly_kwargs = {'fill': '', 'outline': color, 'width': 1}
+            if ch > 0:
+                poly_kwargs['stipple'] = 'gray50'
+            self.create_polygon(coords, **poly_kwargs)
 
         # Clipping-Indikatoren zeichnen
         shadow_pct = clip_shadows / (total_pixels * 3) * 100
@@ -231,13 +235,23 @@ class ProgressDialog:
                        command=self._do_cancel).pack(anchor='e', pady=(5, 0))
 
     def update(self, value: float, status: str = "", detail: str = ""):
-        """Aktualisiert Fortschritt und Statustext."""
-        self.progress_var.set(value)
-        if status:
-            self.status_var.set(status)
-        if detail:
-            self.detail_var.set(detail)
-        self.win.update_idletasks()
+        """Aktualisiert Fortschritt und Statustext.
+
+        Tolerant gegenüber Aufrufen nach `close()`: dann wird stillschweigend
+        ignoriert (kommt bei Worker-Threads vor, die einen letzten Update-Schub
+        schicken nachdem der Dialog bereits zu ist).
+        """
+        try:
+            if not self.win.winfo_exists():
+                return
+            self.progress_var.set(value)
+            if status:
+                self.status_var.set(status)
+            if detail:
+                self.detail_var.set(detail)
+            self.win.update_idletasks()
+        except tk.TclError:
+            pass
 
     def close(self):
         """Schließt den Dialog."""

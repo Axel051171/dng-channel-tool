@@ -3,10 +3,12 @@ Camera Database - loads color matrices from dnglab TOML files.
 """
 
 import os
-import re
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,6 +91,44 @@ def _parse_toml_simple(filepath: str) -> dict:
 _camera_cache: Dict[str, Tuple[float, List[CameraInfo]]] = {}
 
 
+def _max_toml_mtime(cameras_dir: str) -> float:
+    """Maximale mtime über cameras_dir und alle enthaltenen .toml-Dateien.
+
+    Erfasst auch INHALTLICHE Änderungen einzelner TOML-Dateien (das
+    Verzeichnis-mtime allein bleibt unverändert wenn nur ein File-Inhalt
+    aktualisiert wird).
+    """
+    try:
+        max_t = os.path.getmtime(cameras_dir)
+    except OSError:
+        return 0.0
+    for brand_dir in os.listdir(cameras_dir):
+        brand_path = os.path.join(cameras_dir, brand_dir)
+        if not os.path.isdir(brand_path):
+            continue
+        try:
+            max_t = max(max_t, os.path.getmtime(brand_path))
+            for f in os.listdir(brand_path):
+                if f.endswith('.toml'):
+                    try:
+                        max_t = max(max_t, os.path.getmtime(
+                            os.path.join(brand_path, f)))
+                    except OSError:
+                        pass
+        except OSError:
+            continue
+    return max_t
+
+
+def invalidate_camera_cache(dnglab_path: Optional[str] = None) -> None:
+    """Cache leeren (z.B. nach Hot-Reload). Ohne Argument: kompletter Cache."""
+    if dnglab_path is None:
+        _camera_cache.clear()
+        return
+    cameras_dir = os.path.join(dnglab_path, 'rawler', 'data', 'cameras')
+    _camera_cache.pop(cameras_dir, None)
+
+
 def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
     """
     Load camera database from dnglab's rawler/data/cameras/ directory.
@@ -106,15 +146,13 @@ def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
     if not os.path.isdir(cameras_dir):
         return cameras
 
-    # Cache prüfen: mtime des Verzeichnisses
-    try:
-        dir_mtime = os.path.getmtime(cameras_dir)
-        if cameras_dir in _camera_cache:
-            cached_mtime, cached_cameras = _camera_cache[cameras_dir]
-            if cached_mtime >= dir_mtime:
-                return cached_cameras
-    except OSError:
-        pass
+    # Cache prüfen: maximale mtime über alle TOML-Dateien (deckt auch
+    # Inhaltsänderungen ab, nicht nur Add/Remove)
+    dir_mtime = _max_toml_mtime(cameras_dir)
+    if cameras_dir in _camera_cache:
+        cached_mtime, cached_cameras = _camera_cache[cameras_dir]
+        if cached_mtime >= dir_mtime > 0:
+            return cached_cameras
 
     for brand_dir in sorted(os.listdir(cameras_dir)):
         brand_path = os.path.join(cameras_dir, brand_dir)
@@ -153,15 +191,13 @@ def load_camera_database(dnglab_path: str) -> List[CameraInfo]:
                     cameras.append(cam)
 
             except Exception as e:
-                logging.getLogger(__name__).debug(
+                logger.debug(
                     "Kamera-Datenbank: Eintrag übersprungen: %s", e)
                 continue
 
-    # Cache aktualisieren
-    try:
-        _camera_cache[cameras_dir] = (os.path.getmtime(cameras_dir), cameras)
-    except OSError:
-        pass
+    # Cache mit der VOR dem Scan gemessenen mtime aktualisieren (vermeidet
+    # Race wenn während des Scans Dateien geändert wurden).
+    _camera_cache[cameras_dir] = (dir_mtime, cameras)
 
     return cameras
 

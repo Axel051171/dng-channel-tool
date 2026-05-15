@@ -199,6 +199,20 @@ class DNGWriter:
     def write(self, filepath: str, pgm: PGMData, config: DNGConfig):
         """Schreibt eine DNG-Datei."""
         white_level = config.white_level if config.white_level is not None else pgm.max_val
+        # Validierung: Black/White-Level müssen unsigned passen und konsistent sein
+        max_level = (1 << pgm.bits_per_sample) - 1
+        if white_level < 0 or white_level > 0xFFFFFFFF:
+            raise ValueError(f"white_level {white_level} außerhalb 0..2^32-1")
+        if config.black_level < 0 or config.black_level >= white_level:
+            raise ValueError(
+                f"black_level={config.black_level} muss < white_level={white_level} sein")
+        if white_level > max_level:
+            # Hinweis nur, kein Abbruch — manche Pipelines benutzen einen
+            # höheren White-Level absichtlich
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "white_level=%d > maxBitDepth=%d (bits=%d) — Renderer könnten Clipping zeigen",
+                white_level, max_level, pgm.bits_per_sample)
         crop_w, crop_h = config.default_crop_size or (pgm.width, pgm.height)
         is_mono = config.cfa_pattern == "MONO"
 
@@ -296,10 +310,23 @@ class DNGWriter:
         # ── AsShotNeutral (Weißabgleich) ──
         if config.as_shot_neutral is not None:
             r, g, b = config.as_shot_neutral
+            # AsShotNeutral ist TIFF_RATIONAL (unsigned). Werte müssen > 0 sein
+            # (Renderer dividiert durch sie); negative/0/inf/NaN würden hier
+            # einen struct.error oder ein kaputtes Profil erzeugen.
+            def _to_pos_rational(v):
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    fv = 1.0
+                if not (fv > 0) or fv != fv or fv == float('inf'):
+                    fv = 1e-4
+                raw = int(round(fv * 10000))
+                raw = max(1, min(2 ** 32 - 1, raw))
+                return raw
             neutral_data = struct.pack('<IIIIII',
-                                       int(round(r * 10000)), 10000,
-                                       int(round(g * 10000)), 10000,
-                                       int(round(b * 10000)), 10000)
+                                       _to_pos_rational(r), 10000,
+                                       _to_pos_rational(g), 10000,
+                                       _to_pos_rational(b), 10000)
             tags.append((TAG_AS_SHOT_NEUTRAL, TIFF_RATIONAL, 3, neutral_data))
 
         # ── BaselineExposure ──

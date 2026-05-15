@@ -249,10 +249,11 @@ def _write_ncp_v0100(filepath: str, pc: NikonPictureControlFile):
     out += b'\xc2'                       # Unknown flag
     out += bytes([pc.filter_effect])     # Filter effect
     out += bytes([0xFF if pc.sharpening is None else pc.sharpening])
-    out += bytes([pc.contrast or 128])
+    # WICHTIG: nicht `or 128` benutzen – 0 ist ein gültiger Wert (signed -128).
+    out += bytes([128 if pc.contrast is None else pc.contrast])
     out += b'\x01\x01'                   # Unknown
-    out += bytes([pc.brightness or 128])
-    out += bytes([pc.saturation or 128])
+    out += bytes([128 if pc.brightness is None else pc.brightness])
+    out += bytes([128 if pc.saturation is None else pc.saturation])
     out += bytes([0xFF if pc.hue is None else pc.hue])
     out += b'\xff\xff'                   # Unknown (auto values)
     out += b'\x00\x00'                   # Padding
@@ -491,7 +492,9 @@ def to_lightroom_values(pc: NikonPictureControlFile) -> dict:
         'contrast': to_lr(pc.contrast),
         'brightness': to_lr(pc.brightness),
         'saturation': to_lr(pc.saturation),
-        'sharpness': max(0, to_lr(pc.sharpening, 150)) if pc.sharpening else 40,
+        # Schärfe: None ⟶ Adobe-Default 40, sonst tatsächlicher Wert (auch 0)
+        'sharpness': (max(0, to_lr(pc.sharpening, 150))
+                      if pc.sharpening is not None else 40),
         'clarity': to_lr(pc.clarity),
         'is_monochrome': pc.is_monochrome,
         'tone_curve': pc.tone_curve,

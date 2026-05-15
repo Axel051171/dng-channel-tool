@@ -30,7 +30,7 @@ XMP_TEMPLATE = """\
     crs:Version="15.0"
     crs:ProcessVersion="11.0"
     crs:CameraProfile="{profile_name}"
-    crs:Group{{Name}}="{group_name}"
+    crs:Group="{group_name}"
     />
  </rdf:RDF>
 </x:xmpmeta>

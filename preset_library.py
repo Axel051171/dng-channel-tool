@@ -7,8 +7,11 @@ und zeigt sie in einer durchsuchbaren Übersicht mit Vorschaubildern.
 
 import os
 import glob
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

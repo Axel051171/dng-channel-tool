@@ -291,10 +291,12 @@ def remap_hue_sat_map(data: bytes, dims: tuple, mix: MixMatrix, endian: str = '<
     if len(data) < expected_size:
         return data  # Can't process, return unchanged
 
-    # Parse float data
+    # Parse float data.
+    # Adobe DNG-Spec: HueSatMap-Daten sind im Speicher in Reihenfolge
+    # Hue ⟶ Sat ⟶ Value (Hue als äußerster Index).
     try:
         floats = struct.unpack(f'{endian}{num_entries * 3}f', data[:expected_size])
-        arr = np.array(floats).reshape(num_vals, num_sats, num_hues, 3)
+        arr = np.array(floats).reshape(num_hues, num_sats, num_vals, 3)
     except (struct.error, ValueError):
         return data  # Korrupte Daten, unverändert zurückgeben
     result = np.zeros_like(arr)
@@ -321,11 +323,9 @@ def remap_hue_sat_map(data: bytes, dims: tuple, mix: MixMatrix, endian: str = '<
         new_h_idx = int(new_h * num_hues) % num_hues
         hue_remap[h_idx] = new_h_idx
 
-    # Remap entries
+    # Remap entries: kopiere alle (sat, val)-Slices vom alten zum neuen Hue-Index
     for h_idx, new_h_idx in hue_remap.items():
-        for v_idx in range(num_vals):
-            for s_idx in range(num_sats):
-                result[v_idx, s_idx, new_h_idx] = arr[v_idx, s_idx, h_idx]
+        result[new_h_idx] = arr[h_idx]
 
     # Pack back
     return struct.pack(f'{endian}{num_entries * 3}f', *result.flatten().tolist())

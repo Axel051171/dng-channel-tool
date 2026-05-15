@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List, TYPE_CHECKING
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageTk
 
 if TYPE_CHECKING:
     from gui_app import ChannelToolApp
@@ -127,15 +127,19 @@ class BatchDialog:
         self.win.geometry("600x500")
         self.win.transient(parent)
         self.win.grab_set()
+        self.win.protocol('WM_DELETE_WINDOW', self._on_close)
 
         self.files: List[str] = []
+        self._cancelled = False  # Worker beachtet das beim nächsten Iterationsschritt
+        self._worker: 'threading.Thread | None' = None
 
         # File list
         ttk.Label(self.win, text="Dateien:").pack(anchor='w', padx=10, pady=(10, 0))
         list_frame = ttk.Frame(self.win)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.file_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED)
+        self.file_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED,
+                                     exportselection=False)
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.file_list.yview)
         self.file_list.configure(yscrollcommand=scrollbar.set)
         self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -187,7 +191,19 @@ class BatchDialog:
         ttk.Button(action_frame, text="Starten",
                    command=self._start_batch).pack(side=tk.RIGHT, padx=2)
         ttk.Button(action_frame, text="Schließen",
-                   command=self.win.destroy).pack(side=tk.RIGHT, padx=2)
+                   command=self._on_close).pack(side=tk.RIGHT, padx=2)
+
+    def _on_close(self):
+        """Sicheres Schließen: Worker-Thread informieren, Grab freigeben."""
+        self._cancelled = True
+        try:
+            self.win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
 
     def _add_files(self):
         filetypes = [("Alle unterstützten",
@@ -243,14 +259,28 @@ class BatchDialog:
         total = len(self.files)
         logger.info("Batch-Verarbeitung: %d Dateien → %s", total, output_dir)
 
+        def _safe_after(fn):
+            """Marshallt fn ins UI-Thread, prüft auf Cancel und zerstörtes Fenster."""
+            if self._cancelled:
+                return
+            try:
+                if self.win.winfo_exists():
+                    self.win.after(0, fn)
+            except tk.TclError:
+                pass
+
         def _run():
             raw_exts = {'.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2',
                         '.raf', '.pef', '.srw'}
+            processed = 0
 
             for idx, filepath in enumerate(self.files):
+                if self._cancelled:
+                    logger.info("Batch abgebrochen nach %d Dateien", processed)
+                    return
                 try:
                     name = os.path.splitext(os.path.basename(filepath))[0]
-                    self.win.after(0, lambda i=idx, n=name: (
+                    _safe_after(lambda i=idx, n=name: (
                         self.status_label.config(text=f"Verarbeite: {n}…"),
                         self.progress_var.set((i / total) * 100)))
 
@@ -266,20 +296,27 @@ class BatchDialog:
                     out_path = os.path.join(output_dir, name + out_ext)
                     Image.fromarray(result).save(out_path, quality=95)
                     logger.debug("Batch: %s → %s", name, out_path)
+                    processed += 1
 
                 except Exception as e:
-                    logger.warning("Batch-Fehler bei %s: %s", os.path.basename(filepath), e)
-                    self.win.after(0, lambda n=os.path.basename(filepath), err=e:
+                    err_str = str(e)
+                    base = os.path.basename(filepath)
+                    logger.warning("Batch-Fehler bei %s: %s", base, err_str)
+                    _safe_after(lambda n=base, err=err_str:
                         self.status_label.config(text=f"Fehler bei {n}: {err}"))
 
+            if self._cancelled:
+                return
             logger.info("Batch-Verarbeitung abgeschlossen: %d Dateien", total)
-            self.win.after(0, lambda: (
+            _safe_after(lambda: (
                 self.progress_var.set(100),
-                self.status_label.config(text=f"Fertig! {total} Dateien verarbeitet."),
+                self.status_label.config(text=f"Fertig! {processed}/{total} Dateien verarbeitet."),
                 messagebox.showinfo("Batch fertig",
-                    f"{total} Dateien verarbeitet.\nAusgabe: {output_dir}")))
+                    f"{processed}/{total} Dateien verarbeitet.\nAusgabe: {output_dir}",
+                    parent=self.win)))
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._worker = threading.Thread(target=_run, daemon=True)
+        self._worker.start()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -498,9 +535,8 @@ class NEFExtractDialog:
         preset_name = self.pc.name or "Nikon Preset"
 
         try:
-            preset_dir = os.path.join(
-                os.environ.get('APPDATA', ''),
-                'Adobe', 'CameraRaw', 'Settings', 'Nikon Picture Controls')
+            from platform_paths import get_lightroom_preset_dir
+            preset_dir = str(get_lightroom_preset_dir() / 'Nikon Picture Controls')
             os.makedirs(preset_dir, exist_ok=True)
 
             xmp_path = os.path.join(preset_dir, f"{preset_name}.xmp")
@@ -902,9 +938,8 @@ class StyleResultDialog:
     def _install_lightroom(self):
         name = self.style.name or "Extrahierter Stil"
         try:
-            preset_dir = os.path.join(
-                os.environ.get('APPDATA', ''),
-                'Adobe', 'CameraRaw', 'Settings', 'Extrahierte Stile')
+            from platform_paths import get_lightroom_preset_dir
+            preset_dir = str(get_lightroom_preset_dir() / 'Extrahierte Stile')
             os.makedirs(preset_dir, exist_ok=True)
             xmp_path = os.path.join(preset_dir, f"{name}.xmp")
             style_to_xmp(self.style, xmp_path)
@@ -2406,6 +2441,7 @@ class CropDialog:
         self.win.geometry("800x650")
         self.win.transient(parent)
         self.win.grab_set()
+        self.win.protocol('WM_DELETE_WINDOW', self._on_close)
 
         # Crop-Bereich (relativ, 0.0-1.0)
         self.crop_x1 = 0.1
@@ -2414,6 +2450,7 @@ class CropDialog:
         self.crop_y2 = 0.9
         self._drag_mode = None
         self._drag_start = None
+        self._after_id = None
 
         # ── Optionen ──
         opt_frame = ttk.Frame(self.win)
@@ -2447,9 +2484,25 @@ class CropDialog:
         ttk.Button(btn_frame, text="Zurücksetzen",
                    command=self._reset).pack(side=tk.RIGHT, padx=3)
         ttk.Button(btn_frame, text="Abbrechen",
-                   command=self.win.destroy).pack(side=tk.RIGHT, padx=3)
+                   command=self._on_close).pack(side=tk.RIGHT, padx=3)
 
-        self.win.after(50, self._draw)
+        self._after_id = self.win.after(50, self._draw)
+
+    def _on_close(self):
+        if self._after_id is not None:
+            try:
+                self.win.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        try:
+            self.win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
 
     def _draw(self):
         """Zeichnet Bild + Crop-Overlay."""

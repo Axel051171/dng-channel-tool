@@ -33,8 +33,15 @@ def _parse_hue_sat_map(data: bytes, dims: tuple, endian: str = '<') -> np.ndarra
         wobei Kanal 0=HueShift, 1=SatScale, 2=ValScale
     """
     hue_divs, sat_divs, val_divs = dims
+    if hue_divs <= 0 or sat_divs <= 0 or val_divs <= 0:
+        raise ValueError(f"Ungültige HueSatMap-Dimensionen: {dims}")
     num_entries = hue_divs * sat_divs * val_divs
-    floats = struct.unpack(f'{endian}{num_entries * 3}f', data[:num_entries * 12])
+    expected = num_entries * 12  # 3 floats à 4 Byte
+    if len(data) < expected:
+        raise ValueError(
+            f"HueSatMap-Daten zu kurz: {len(data)} Bytes erhalten, "
+            f"{expected} erwartet ({hue_divs}×{sat_divs}×{val_divs}×3 floats)")
+    floats = struct.unpack(f'{endian}{num_entries * 3}f', data[:expected])
     return np.array(floats, dtype=np.float32).reshape(hue_divs, sat_divs, val_divs, 3)
 
 

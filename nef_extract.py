@@ -14,8 +14,11 @@ Unterstützt:
 
 import os
 import uuid
+import logging
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import exifread
@@ -212,6 +215,9 @@ def _parse_pc_v0300(pc: NikonPictureControl, vals: list):
     # The parameter block starts at offset 48
     # Format appears to use pairs where even bytes are flags and odd bytes are values
     # Based on analysis of real Nikon Z files:
+    if len(vals) <= 51:
+        # Datenblock zu kurz – das ist kein v0300-Format
+        return
 
     # Offset 49: Filter Effect (for mono)
     if vals[49] in FILTER_EFFECTS:
@@ -356,7 +362,7 @@ def picture_control_to_xmp(pc: NikonPictureControl, filepath: str,
     crs:SplitToningHighlightHue="{toning_hue}"
     crs:SplitToningHighlightSaturation="{toning_sat}"
     crs:SplitToningBalance="0"{filter_adjustments}
-    crs:Group{{Name}}="Nikon Picture Controls"
+    crs:Group="Nikon Picture Controls"
     >
    <crs:ToneCurvePV2012>
     <rdf:Seq>

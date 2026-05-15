@@ -101,9 +101,13 @@ def _build_curve_type(values: Union[List[float], float, None]) -> bytes:
     # Single gamma value
     if isinstance(values, (int, float)):
         gamma = float(values)
+        if not (0.0 < gamma <= 255.0):
+            raise ValueError(
+                f"ICC Gamma muss > 0 und ≤ 255 sein, war {gamma}. "
+                "Für Inversion oder Spezialkurven eine LUT übergeben.")
         # u8Fixed8Number: integer part in high byte, fractional * 256 in low byte
         gamma_fixed = int(round(gamma * 256.0))
-        gamma_fixed = max(0, min(65535, gamma_fixed))
+        gamma_fixed = max(1, min(65535, gamma_fixed))
         return sig + reserved + _u32(1) + struct.pack('>H', gamma_fixed)
 
     # Full curve LUT

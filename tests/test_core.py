@@ -931,21 +931,34 @@ class TestUndoManager:
         um.push(img1, np.eye(3), "Schritt 1")
         um.push(img2, np.eye(3) * 2, "Schritt 2")
         assert um.can_undo
-        state = um.undo()
+        # Aktueller Zustand ist img3 (NACH "Schritt 2")
+        img3 = np.ones((5, 5, 3), dtype=np.uint8) * 255
+        state = um.undo(img3, np.eye(3) * 3)
         assert state is not None
+        # Undo gibt den BEFORE-Snapshot der letzten Aktion zurück (img2 mit desc "Schritt 2")
+        assert state.description == "Schritt 2"
+        np.testing.assert_array_equal(state.preview_image, img2)
 
     def test_undo_redo_cycle(self):
         from undo import UndoManager
         um = UndoManager()
-        img = np.zeros((5, 5, 3), dtype=np.uint8)
-        um.push(img, np.eye(3), "A")
-        um.push(img, np.eye(3), "B")
+        img_a = np.zeros((5, 5, 3), dtype=np.uint8)
+        img_b = np.ones((5, 5, 3), dtype=np.uint8) * 50
+        img_c = np.ones((5, 5, 3), dtype=np.uint8) * 100
+        um.push(img_a, np.eye(3), "A")  # vor Action A
+        um.push(img_b, np.eye(3), "B")  # vor Action B; current state = img_c
 
-        um.undo()
+        # Undo: aktueller Zustand ist img_c (nach B)
+        state = um.undo(img_c, np.eye(3))
+        assert state.description == "B"
+        np.testing.assert_array_equal(state.preview_image, img_b)
         assert um.can_redo
-        state = um.redo()
+
+        # Redo: aktueller Zustand ist img_b (nach Undo)
+        state = um.redo(img_b, np.eye(3))
         assert state is not None
         assert state.description == "B"
+        np.testing.assert_array_equal(state.preview_image, img_c)
 
     def test_push_clears_redo(self):
         from undo import UndoManager
@@ -953,7 +966,7 @@ class TestUndoManager:
         img = np.zeros((5, 5, 3), dtype=np.uint8)
         um.push(img, np.eye(3), "A")
         um.push(img, np.eye(3), "B")
-        um.undo()
+        um.undo(img, np.eye(3))
         assert um.can_redo
         # Neuer Push löscht Redo
         um.push(img, np.eye(3), "C")
@@ -968,7 +981,7 @@ class TestUndoManager:
         # Nur die letzten 3 sollten noch da sein
         count = 0
         while um.can_undo:
-            um.undo()
+            um.undo(img, np.eye(3))
             count += 1
         assert count == 3
 
@@ -989,7 +1002,7 @@ class TestUndoManager:
         img = np.zeros((5, 5, 3), dtype=np.uint8)
         um.push(img, np.eye(3), "A")
         assert len(calls) == 1
-        um.undo()
+        um.undo(img, np.eye(3))
         assert len(calls) == 2
 
     def test_descriptions(self):
@@ -1000,6 +1013,8 @@ class TestUndoManager:
         img = np.zeros((5, 5, 3), dtype=np.uint8)
         um.push(img, np.eye(3), "Kanal-Tausch")
         assert um.undo_description == "Kanal-Tausch"
+        um.undo(img, np.eye(3))
+        assert um.redo_description == "Kanal-Tausch"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1946,6 +1961,247 @@ class TestCameraDBCache:
         cams2 = load_camera_database(path)
         assert len(cams1) == len(cams2)
         assert cams1 is cams2  # Sollte dasselbe Objekt sein (Cache)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Regression-Tests für Bug-Fixes (Audit-Pass)
+# ═══════════════════════════════════════════════════════════
+
+class TestFloatToSrationalRobustness:
+    """`_float_to_srational` muss inf/nan/overflow ohne Crash handhaben."""
+
+    def test_finite_value(self):
+        from dcp_io import _float_to_srational
+        num, den = _float_to_srational(1.5)
+        assert num / den == 1.5
+
+    def test_inf_returns_zero(self):
+        from dcp_io import _float_to_srational
+        import math
+        num, _ = _float_to_srational(math.inf)
+        assert num == 0
+
+    def test_nan_returns_zero(self):
+        from dcp_io import _float_to_srational
+        import math
+        num, _ = _float_to_srational(math.nan)
+        assert num == 0
+
+    def test_overflow_clamped_to_int32(self):
+        from dcp_io import _float_to_srational
+        num, _ = _float_to_srational(1e30)
+        assert -(2 ** 31) <= num <= 2 ** 31 - 1
+
+    def test_negative_overflow_clamped(self):
+        from dcp_io import _float_to_srational
+        num, _ = _float_to_srational(-1e30)
+        assert -(2 ** 31) <= num <= 2 ** 31 - 1
+
+
+class TestHueSatMapAxisOrdering:
+    """HueSatMap-Reshape muss Hue als äußersten Index verwenden (DNG-Spec)."""
+
+    def test_remap_preserves_data_size(self):
+        from channel_swap import remap_hue_sat_map, MixMatrix
+        num_hues, num_sats, num_vals = 90, 3, 1
+        # Identitätsmatrix lässt die Daten unverändert
+        identity = MixMatrix(matrix=np.eye(3, dtype=np.float32))
+        # Erstellen: Werte 0,1,2,…
+        raw = np.arange(num_hues * num_sats * num_vals * 3, dtype=np.float32)
+        data = struct.pack(f'<{raw.size}f', *raw.tolist())
+        result = remap_hue_sat_map(data, (num_hues, num_sats, num_vals), identity, '<')
+        assert len(result) == len(data)
+        # Bei Identity-Mix MUSS das Ergebnis bitidentisch sein
+        assert result == data
+
+    def test_dcp_xml_parse_bounds(self):
+        from dcp_xml import _parse_hue_sat_map
+        # Zu kurze Daten müssen ValueError werfen (nicht struct.error)
+        with pytest.raises(ValueError):
+            _parse_hue_sat_map(b'\x00' * 8, (10, 5, 1), '<')
+
+    def test_dcp_xml_parse_invalid_dims(self):
+        from dcp_xml import _parse_hue_sat_map
+        with pytest.raises(ValueError):
+            _parse_hue_sat_map(b'\x00' * 1000, (0, 5, 1), '<')
+
+
+class TestICCGammaValidation:
+    """`_build_curve_type` muss ungültige Gamma-Werte ablehnen."""
+
+    def test_gamma_zero_rejected(self):
+        from icc_export import _build_curve_type
+        with pytest.raises(ValueError):
+            _build_curve_type(0.0)
+
+    def test_gamma_negative_rejected(self):
+        from icc_export import _build_curve_type
+        with pytest.raises(ValueError):
+            _build_curve_type(-2.2)
+
+    def test_gamma_too_large_rejected(self):
+        from icc_export import _build_curve_type
+        with pytest.raises(ValueError):
+            _build_curve_type(300.0)
+
+    def test_gamma_valid(self):
+        from icc_export import _build_curve_type
+        result = _build_curve_type(2.2)
+        assert isinstance(result, bytes)
+        assert result.startswith(b'curv')
+
+
+class TestNPCFalsyValueBug:
+    """Schreib-Roundtrip muss contrast=0/brightness=0 erhalten (nicht zu 128 mappen)."""
+
+    def test_contrast_zero_preserved(self):
+        from npc_io import NikonPictureControlFile, write_npc, read_npc
+        pc = NikonPictureControlFile(
+            name="Test", contrast=0, brightness=0, saturation=0,
+            sharpening=0, hue=0, clarity=0)
+        with tempfile.NamedTemporaryFile(suffix='.npc', delete=False) as f:
+            path = f.name
+        try:
+            write_npc(path, pc)
+            loaded = read_npc(path)
+            # Werte = 0 (nicht zu 128 verfälscht)
+            assert loaded.contrast == 0, \
+                f"contrast=0 wurde zu {loaded.contrast} verfälscht (falsy-bug)"
+            assert loaded.brightness == 0
+            assert loaded.saturation == 0
+        finally:
+            os.unlink(path)
+
+    def test_sharpness_zero_stays_zero_in_lightroom(self):
+        from npc_io import NikonPictureControlFile, to_lightroom_values
+        pc = NikonPictureControlFile(name="Z", sharpening=0)
+        lr = to_lightroom_values(pc)
+        # to_lr(0, 150) = int((0-128)/128 * 150) = -150 → max(0, -150) = 0
+        assert lr['sharpness'] == 0, \
+            f"sharpening=0 wurde fälschlich zum Default 40 (falsy-bug), war {lr['sharpness']}"
+
+    def test_sharpness_none_uses_default(self):
+        from npc_io import NikonPictureControlFile, to_lightroom_values
+        pc = NikonPictureControlFile(name="Z", sharpening=None)
+        lr = to_lightroom_values(pc)
+        assert lr['sharpness'] == 40  # Adobe-Default
+
+
+class TestDNGWriterValidation:
+    """DNG-Writer muss negative/falsche white_level ablehnen."""
+
+    def test_white_level_must_exceed_black_level(self):
+        from dng_writer import DNGWriter, PGMData, DNGConfig
+        pgm = PGMData(width=10, height=10, max_val=255, bits_per_sample=8,
+                      pixel_data=np.zeros((10, 10), dtype=np.uint8).tobytes())
+        config = DNGConfig(camera_model="X", black_level=200, white_level=100,
+                           cfa_pattern="RGGB")
+        writer = DNGWriter()
+        with tempfile.NamedTemporaryFile(suffix='.dng', delete=False) as f:
+            path = f.name
+        try:
+            with pytest.raises(ValueError):
+                writer.write(path, pgm, config)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_as_shot_neutral_negative_not_crash(self):
+        """Negativ-Werte würden bei unsigned-Pack normalerweise crashen — Writer muss clampen."""
+        from dng_writer import DNGWriter, PGMData, DNGConfig
+        pgm = PGMData(width=4, height=4, max_val=255, bits_per_sample=8,
+                      pixel_data=np.zeros((4, 4), dtype=np.uint8).tobytes())
+        config = DNGConfig(camera_model="X", black_level=0, white_level=255,
+                           cfa_pattern="RGGB", as_shot_neutral=(-0.5, 1.0, 0.0))
+        writer = DNGWriter()
+        with tempfile.NamedTemporaryFile(suffix='.dng', delete=False) as f:
+            path = f.name
+        try:
+            # Darf nicht mit struct.error crashen
+            writer.write(path, pgm, config)
+            assert os.path.getsize(path) > 0
+        finally:
+            os.unlink(path)
+
+
+class TestXMPGroupAttributeValid:
+    """Geschriebene XMP-Dateien müssen valides XML sein (kein crs:Group{Name})."""
+
+    def test_xmp_preset_parses(self):
+        import xml.etree.ElementTree as ET
+        from xmp_export import write_xmp_preset
+        with tempfile.NamedTemporaryFile(suffix='.xmp', delete=False) as f:
+            path = f.name
+        try:
+            write_xmp_preset(path, profile_name="TestProfile",
+                             camera_model="X100", group_name="Test Gruppe")
+            # Muss ohne ParseError parsen
+            ET.parse(path)
+        finally:
+            os.unlink(path)
+
+
+class TestUndoRedoFidelity:
+    """Vollständiger Undo→Redo-Zyklus muss exakte Zustände wiederherstellen."""
+
+    def test_image_content_preserved_across_undo_redo(self):
+        from undo import UndoManager
+        um = UndoManager()
+        img_a = np.full((4, 4, 3), 10, dtype=np.uint8)
+        img_b = np.full((4, 4, 3), 50, dtype=np.uint8)
+        img_c = np.full((4, 4, 3), 200, dtype=np.uint8)
+        m_a = np.eye(3)
+        m_b = np.eye(3) * 2
+        m_c = np.eye(3) * 3
+        # Aktionen: A→B (push B-Marker mit BEFORE=A), B→C (push C-Marker BEFORE=B)
+        um.push(img_a, m_a, "Action A")
+        um.push(img_b, m_b, "Action B")
+        # Undo Action B (aktueller Zustand = C)
+        s1 = um.undo(img_c, m_c)
+        assert s1.description == "Action B"
+        np.testing.assert_array_equal(s1.preview_image, img_b)
+        np.testing.assert_array_equal(s1.mix_matrix, m_b)
+        # Redo Action B (aktueller Zustand jetzt = B)
+        s2 = um.redo(img_b, m_b)
+        np.testing.assert_array_equal(s2.preview_image, img_c)
+        np.testing.assert_array_equal(s2.mix_matrix, m_c)
+
+
+class TestCameraDBCacheInvalidation:
+    """Cache muss invalidieren, wenn TOML-Inhalt sich ändert."""
+
+    def test_content_change_busts_cache(self):
+        import time
+        from camera_db import load_camera_database, invalidate_camera_cache
+        toml_template = (
+            'make = "TestBrand"\n'
+            'model = "{name}"\n'
+            'clean_make = "TestBrand"\n'
+            'clean_model = "{name}"\n'
+            '\n[cameras.color_matrix]\n'
+            'A = [1, 0, 0, 0, 1, 0, 0, 0, 1]\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cam_dir = os.path.join(tmp, 'rawler', 'data', 'cameras', 'TestBrand')
+            os.makedirs(cam_dir, exist_ok=True)
+            toml = os.path.join(cam_dir, 'cam.toml')
+            with open(toml, 'w') as f:
+                f.write(toml_template.format(name='CamV1'))
+
+            invalidate_camera_cache(tmp)
+            cams1 = load_camera_database(tmp)
+            assert len(cams1) == 1
+            assert cams1[0].clean_model == "CamV1"
+
+            # mtime erhöhen + Inhalt ändern
+            future = time.time() + 5
+            with open(toml, 'w') as f:
+                f.write(toml_template.format(name='CamV2'))
+            os.utime(toml, (future, future))
+
+            cams2 = load_camera_database(tmp)
+            assert cams2[0].clean_model == "CamV2", \
+                "Cache wurde nicht invalidiert obwohl der TOML-Inhalt sich änderte"
 
 
 # ═══════════════════════════════════════════════════════════

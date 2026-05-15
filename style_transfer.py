@@ -339,24 +339,16 @@ def _compute_transfer_curve(orig_ch: np.ndarray, styled_ch: np.ndarray,
     Berechnet die Transfer-Kurve zwischen Original und gestyltem Kanal.
     Für jeden Eingangswert: durchschnittlicher Ausgangswert.
     """
-    orig_flat = np.clip(orig_ch.ravel(), 0, 255).astype(int)
-    styl_flat = np.clip(styled_ch.ravel(), 0, 255).astype(int)
+    orig_flat = np.clip(orig_ch.ravel(), 0, 255).astype(np.intp)
+    styl_flat = np.clip(styled_ch.ravel(), 0, 255).astype(np.float64)
 
-    # Für jeden Eingangswert den durchschnittlichen Ausgangswert berechnen
-    sums = np.zeros(256, dtype=float)
-    counts = np.zeros(256, dtype=float)
+    # Vektorisiert: np.bincount ist O(N) in C, der frühere Python-Loop war
+    # bei 24 MP-Bildern mehrere Sekunden langsam.
+    sums = np.bincount(orig_flat, weights=styl_flat, minlength=256)
+    counts = np.bincount(orig_flat, minlength=256).astype(np.float64)
 
-    for o, s in zip(orig_flat, styl_flat):
-        sums[o] += s
-        counts[o] += 1
-
-    # Transfer function
-    transfer = np.zeros(256)
-    for i in range(256):
-        if counts[i] > 0:
-            transfer[i] = sums[i] / counts[i]
-        else:
-            transfer[i] = i  # Identity fallback
+    # Transfer function: gewichteter Durchschnitt; bei counts==0 → Identity
+    transfer = np.where(counts > 0, sums / np.maximum(counts, 1), np.arange(256))
 
     # Glätten
     kernel = np.ones(5) / 5

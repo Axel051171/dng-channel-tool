@@ -32,7 +32,7 @@ def write_cube_lut(filepath: str, lut_data: np.ndarray, title: str = "DNG Channe
     if size == 0:
         size = lut_data.shape[0]
 
-    with open(filepath, 'w') as f:
+    with open(filepath, 'w', encoding='utf-8') as f:
         f.write(f"# Created by DNG Channel Tool\n")
         f.write(f"TITLE \"{title}\"\n")
         f.write(f"LUT_3D_SIZE {size}\n")
@@ -55,7 +55,7 @@ def write_1d_cube_lut(filepath: str, lut_r: np.ndarray, lut_g: np.ndarray,
     if size == 0:
         size = len(lut_r)
 
-    with open(filepath, 'w') as f:
+    with open(filepath, 'w', encoding='utf-8') as f:
         f.write(f"# Created by DNG Channel Tool\n")
         f.write(f"TITLE \"{title}\"\n")
         f.write(f"LUT_1D_SIZE {size}\n")
